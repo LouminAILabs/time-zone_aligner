@@ -1,6 +1,7 @@
-import { ApiProperty, PartialType } from "@nestjs/swagger";
-import { WebhookTriggerEvents } from "@prisma/client";
+import { ApiProperty, ApiPropertyOptional, PartialType } from "@nestjs/swagger";
 import { IsArray, IsBoolean, IsEnum, IsOptional, IsString } from "class-validator";
+
+import { WebhookTriggerEvents } from "@calcom/platform-libraries";
 
 export class CreateWebhookInputDto {
   @IsString()
@@ -19,9 +20,11 @@ export class CreateWebhookInputDto {
   payloadTemplate?: string;
 
   @IsBoolean()
+  @ApiProperty()
   active!: boolean;
 
   @IsString()
+  @ApiProperty()
   subscriberUrl!: string;
 
   @IsArray()
@@ -43,6 +46,7 @@ export class CreateWebhookInputDto {
 
   @IsString()
   @IsOptional()
+  @ApiPropertyOptional()
   secret?: string;
 }
 

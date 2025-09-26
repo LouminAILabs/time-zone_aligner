@@ -4,16 +4,59 @@ import { useState, memo } from "react";
 
 import { useLocale } from "@calcom/lib/hooks/useLocale";
 import { localStorage } from "@calcom/lib/webstorage";
-import { Card } from "@calcom/ui";
+import { Card } from "@calcom/ui/components/card";
 
-export const tips = [
+type Tip = {
+  id: number;
+  thumbnailUrl: string;
+  mediaLink?: string;
+  title: string;
+  description: string;
+  href: string;
+  coverPhoto?: string;
+  variant?: "SidebarCard" | "NewLaunchSidebarCard";
+};
+
+export const tips: Tip[] = [
+  {
+    id: 17,
+    thumbnailUrl: "https://img.youtube.com/vi/fMHW6jYPIb8/0.jpg",
+    mediaLink: "https://go.cal.com/embed-video",
+    title: "Embed",
+    description: "Embed your booking page on your website",
+    href: "https://go.cal.com/embed-video",
+  },
+  {
+    id: 16,
+    thumbnailUrl: "https://img.youtube.com/vi/xopxmk2H4Ng/0.jpg",
+    mediaLink: "https://go.cal.com/paid-booking",
+    title: "Paid Bookings",
+    description: "Charge for your time with Cal.com's paid bookings",
+    href: "https://go.cal.com/paid-booking",
+  },
+  {
+    id: 15,
+    thumbnailUrl: "https://img.youtube.com/vi/ZjSD1yPgLLQ/0.jpg",
+    mediaLink: "https://go.cal.com/instant-meetings-video",
+    title: "Instant Meetings",
+    description: "Book meetings instantly with a link",
+    href: "https://go.cal.com/instant-meetings-video",
+  },
+  {
+    id: 14,
+    thumbnailUrl: "https://img.youtube.com/vi/IZ4-nUiIpvY/0.jpg",
+    mediaLink: "https://go.cal.com/custom-attributes",
+    title: "Custom Attributes",
+    description: "Define roles and attributes for your teams",
+    href: "https://go.cal.com/custom-attributes",
+  },
   {
     id: 13,
-    thumbnailUrl: "https://img.youtube.com/vi/ihE8OYTdklg/0.jpg",
-    mediaLink: "https://go.cal.com/ooo",
+    thumbnailUrl: "https://img.youtube.com/vi/TTAASLLPKk0/0.jpg",
+    mediaLink: "https://go.cal.com/ooo-video",
     title: "ooo.new",
     description: "Easily go out-of-office",
-    href: "https://ooo.new",
+    href: "https://go.cal.com/ooo-video",
   },
   {
     id: 12,
@@ -89,11 +132,11 @@ export const tips = [
   },
   {
     id: 3,
-    thumbnailUrl: "https://img.youtube.com/vi/c7ZKFuLy1fg/0.jpg",
-    mediaLink: "https://go.cal.com/routing-video",
+    thumbnailUrl: "https://img.youtube.com/vi/-L8MCiT6uhQ/0.jpg",
+    mediaLink: "https://youtu.be/-L8MCiT6uhQ?si=DRJzRNhN85hqAwBl",
     title: "Routing Forms, Workflows",
     description: "Ask screening questions of potential bookers to connect them with the right person",
-    href: "https://cal.com/blog/cal-v-1-8",
+    href: "https://youtu.be/-L8MCiT6uhQ?si=DRJzRNhN85hqAwBl",
   },
   {
     id: 2,
@@ -105,20 +148,30 @@ export const tips = [
   },
   {
     id: 1,
-    thumbnailUrl: "https://img.youtube.com/vi/60HJt8DOVNo/0.jpg",
-    mediaLink: "https://go.cal.com/dynamic-video",
+    thumbnailUrl: "https://img.youtube.com/vi/VZ5PfQzzxBw/0.jpg",
+    mediaLink: "https://youtu.be/VZ5PfQzzxBw?si=oB0LPSxG8dWIwg5a",
     title: "Dynamic booking links",
     description: "Booking link that allows people to quickly schedule meetings.",
-    href: "https://cal.com/blog/cal-v-1-9",
+    href: "https://youtu.be/VZ5PfQzzxBw?si=oB0LPSxG8dWIwg5a",
   },
 ];
 
-const reversedTips = shuffle(tips).slice(0).reverse();
+const CalAIWorkflowsTip: Tip = {
+  id: 18,
+  thumbnailUrl: "https://img.youtube.com/vi/fMHW6jYPIb8/0.jpg",
+  title: "cal_ai_workflows",
+  description: "supercharge_your_workflows_with_cal_ai_description",
+  href: "/workflows",
+  coverPhoto: "/cal-ai-workflow-sidebar.jpg",
+  variant: "NewLaunchSidebarCard",
+};
+
+const reversedTips = [...shuffle(tips).slice(0).reverse(), CalAIWorkflowsTip];
 
 function Tips() {
   const { t } = useLocale();
 
-  const [list, setList] = useState<typeof tips>(() => {
+  const [list, setList] = useState<Tip[]>(() => {
     if (typeof window === "undefined") {
       return reversedTips;
     }
@@ -141,9 +194,11 @@ function Tips() {
       const items = localStorage.getItem("removedTipsIds") || "";
       const itemToRemoveIndex = currentItems.findIndex((item) => item.id === id);
 
+      if (itemToRemoveIndex === -1) return [...currentItems];
+
       localStorage.setItem(
         "removedTipsIds",
-        `${currentItems[itemToRemoveIndex].id.toString()}${items.length > 0 ? `,${items.split(",")}` : ""}`
+        `${currentItems[itemToRemoveIndex].id.toString()}${items.length > 0 ? `,${items}` : ""}`
       );
       currentItems.splice(itemToRemoveIndex, 1);
       return [...currentItems];
@@ -152,42 +207,63 @@ function Tips() {
 
   const baseOriginalList = list.slice(0).reverse();
   return (
-    <div
-      className="hidden pb-4 pt-8 lg:grid"
-      /* ref={animationRef} */
-      style={{
-        gridTemplateColumns: "1fr",
-      }}>
-      {list.map((tip) => {
-        return (
-          <div
-            className="relative"
-            style={{
-              gridRowStart: 1,
-              gridColumnStart: 1,
-            }}
-            key={tip.id}>
+    <>
+      <div
+        className="hidden pb-4 pt-8 lg:grid"
+        /* ref={animationRef} */
+        style={{
+          gridTemplateColumns: "1fr",
+        }}>
+        {list.map((tip) => {
+          const isTopTip = baseOriginalList.indexOf(tip) === 0;
+          const isCalAIWorkflowsTip = tip.title === "cal_ai_workflows";
+          return (
             <div
               className="relative"
               style={{
-                transform: `scale(${1 - baseOriginalList.indexOf(tip) / 20})`,
-                top: -baseOriginalList.indexOf(tip) * 10,
-                opacity: `${1 - baseOriginalList.indexOf(tip) / 7}`,
-              }}>
-              <Card
-                variant="SidebarCard"
-                thumbnailUrl={tip.thumbnailUrl}
-                mediaLink={tip.mediaLink}
-                title={tip.title}
-                description={tip.description}
-                learnMore={{ href: tip.href, text: t("learn_more") }}
-                actionButton={{ onClick: () => handleRemoveItem(tip.id), child: t("dismiss") }}
-              />
+                gridRowStart: 1,
+                gridColumnStart: 1,
+              }}
+              key={tip.id}>
+              <div
+                className="relative"
+                style={{
+                  transform: `scale(${1 - baseOriginalList.indexOf(tip) / 20})`,
+                  top: -baseOriginalList.indexOf(tip) * 10,
+                  opacity: `${1 - baseOriginalList.indexOf(tip) / 7}`,
+                }}>
+                <Card
+                  variant={tip.variant ?? "SidebarCard"}
+                  thumbnailUrl={tip.thumbnailUrl}
+                  coverPhoto={tip.coverPhoto}
+                  mediaLink={isTopTip ? tip.mediaLink : undefined}
+                  title={t(tip.title)}
+                  description={t(tip.description)}
+                  learnMore={
+                    isTopTip
+                      ? {
+                          href: isCalAIWorkflowsTip
+                            ? "/workflow/new?action=calAi&templateWorkflowId=wf-11"
+                            : tip.href,
+                          text: isCalAIWorkflowsTip ? t("try_now") : t("learn_more"),
+                        }
+                      : undefined
+                  }
+                  actionButton={
+                    isTopTip ? { onClick: () => handleRemoveItem(tip.id), child: t("dismiss") } : undefined
+                  }
+                  containerProps={{
+                    tabIndex: isTopTip ? undefined : -1,
+                    "aria-hidden": isTopTip ? undefined : "true",
+                  }}
+                  buttonClassName={isCalAIWorkflowsTip ? "text-white" : undefined}
+                />
+              </div>
             </div>
-          </div>
-        );
-      })}
-    </div>
+          );
+        })}
+      </div>
+    </>
   );
 }
 

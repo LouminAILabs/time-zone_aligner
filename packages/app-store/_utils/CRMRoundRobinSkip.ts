@@ -1,28 +1,40 @@
-import type { Prisma } from "@prisma/client";
 import type { z } from "zod";
 
-import CrmManager from "@calcom/core/crmManager/crmManager";
+import type { EventTypeAppMetadataSchema } from "@calcom/app-store/zod-utils";
+import CrmManager from "@calcom/lib/crmManager/crmManager";
 import logger from "@calcom/lib/logger";
 import { prisma } from "@calcom/prisma";
-import type { EventTypeAppMetadataSchema } from "@calcom/prisma/zod-utils";
+import type { Prisma } from "@calcom/prisma/client";
 import { EventTypeMetaDataSchema } from "@calcom/prisma/zod-utils";
 
 export async function getCRMContactOwnerForRRLeadSkip(
   bookerEmail: string,
   eventTypeMetadata: Prisma.JsonValue
-): Promise<string | undefined> {
+): Promise<{
+  email: string | null;
+  recordType: string | null;
+  crmAppSlug: string | null;
+  recordId: string | null;
+}> {
+  const nullReturnValue = { email: null, recordType: null, crmAppSlug: "", recordId: null };
   const parsedEventTypeMetadata = EventTypeMetaDataSchema.safeParse(eventTypeMetadata);
-  if (!parsedEventTypeMetadata.success || !parsedEventTypeMetadata.data?.apps) return;
+  if (!parsedEventTypeMetadata.success || !parsedEventTypeMetadata.data?.apps) return nullReturnValue;
 
   const crm = await getCRMManagerWithRRLeadSkip(parsedEventTypeMetadata.data.apps);
 
-  if (!crm) return;
+  if (!crm) return nullReturnValue;
+  const { crmManager, crmAppSlug } = crm;
   const startTime = performance.now();
-  const contact = await crm.getContacts({ emails: bookerEmail, forRoundRobinSkip: true });
+  const contact = await crmManager.getContacts({ emails: bookerEmail, forRoundRobinSkip: true });
   const endTime = performance.now();
   logger.info(`Fetching from CRM took ${endTime - startTime}ms`);
-  if (!contact?.length) return;
-  return contact[0].ownerEmail;
+  if (!contact?.length || !contact[0].ownerEmail) return nullReturnValue;
+  return {
+    email: contact[0].ownerEmail ?? null,
+    recordType: contact[0].recordType ?? null,
+    crmAppSlug,
+    recordId: contact[0].id ?? null,
+  };
 }
 
 async function getCRMManagerWithRRLeadSkip(apps: z.infer<typeof EventTypeAppMetadataSchema>) {
@@ -53,5 +65,8 @@ async function getCRMManagerWithRRLeadSkip(apps: z.infer<typeof EventTypeAppMeta
     },
   });
   if (!crmCredential) return;
-  return new CrmManager(crmCredential, crmRoundRobinLeadSkip);
+  return {
+    crmManager: new CrmManager(crmCredential, crmRoundRobinLeadSkip),
+    crmAppSlug: crmCredential.appId,
+  };
 }

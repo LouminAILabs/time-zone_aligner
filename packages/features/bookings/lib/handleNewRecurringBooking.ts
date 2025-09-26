@@ -1,29 +1,25 @@
-import type { NextApiRequest } from "next";
-
+import type { CreateBookingMeta, CreateRecurringBookingData } from "@calcom/features/bookings/lib/dto/types";
 import handleNewBooking from "@calcom/features/bookings/lib/handleNewBooking";
-import type { RecurringBookingCreateBody, BookingResponse } from "@calcom/features/bookings/types";
-import { SchedulingType } from "@calcom/prisma/client";
+import type { BookingResponse } from "@calcom/features/bookings/types";
+import { SchedulingType } from "@calcom/prisma/enums";
 import type { AppsStatus } from "@calcom/types/Calendar";
 
-export const handleNewRecurringBooking = async (
-  req: NextApiRequest & {
-    userId?: number | undefined;
-    platformClientId?: string;
-    platformRescheduleUrl?: string;
-    platformCancelUrl?: string;
-    platformBookingUrl?: string;
-    platformBookingLocation?: string;
-    noEmail?: boolean;
-  }
-): Promise<BookingResponse[]> => {
-  const data: RecurringBookingCreateBody[] = req.body;
+import type { RegularBookingService } from "./handleNewBooking";
+import type { IBookingService } from "./interfaces/IBookingService";
+
+export type BookingHandlerInput = {
+  bookingData: CreateRecurringBookingData;
+} & CreateBookingMeta;
+
+export const handleNewRecurringBooking = async (input: BookingHandlerInput): Promise<BookingResponse[]> => {
+  const data = input.bookingData;
   const createdBookings: BookingResponse[] = [];
   const allRecurringDates: { start: string | undefined; end: string | undefined }[] = data.map((booking) => {
     return { start: booking.start, end: booking.end };
   });
   const appsStatus: AppsStatus[] | undefined = undefined;
 
-  const numSlotsToCheckForAvailability = 2;
+  const numSlotsToCheckForAvailability = 1;
 
   let thirdPartyRecurringEventId = null;
 
@@ -33,10 +29,18 @@ export const handleNewRecurringBooking = async (
 
   let luckyUsers = undefined;
 
-  if (isRoundRobin) {
-    const recurringEventReq: NextApiRequest & { userId?: number } = req;
+  const handleBookingMeta = {
+    userId: input.userId,
+    platformClientId: input.platformClientId,
+    platformRescheduleUrl: input.platformRescheduleUrl,
+    platformCancelUrl: input.platformCancelUrl,
+    platformBookingUrl: input.platformBookingUrl,
+    platformBookingLocation: input.platformBookingLocation,
+    areCalendarEventsEnabled: input.areCalendarEventsEnabled,
+  };
 
-    recurringEventReq.body = {
+  if (isRoundRobin) {
+    const recurringEventData = {
       ...firstBooking,
       appsStatus,
       allRecurringDates,
@@ -44,10 +48,15 @@ export const handleNewRecurringBooking = async (
       thirdPartyRecurringEventId,
       numSlotsToCheckForAvailability,
       currentRecurringIndex: 0,
-      noEmail: false,
+      noEmail: input.noEmail !== undefined ? input.noEmail : false,
     };
 
-    const firstBookingResult = await handleNewBooking(recurringEventReq);
+    const firstBookingResult = await handleNewBooking({
+      bookingData: recurringEventData,
+      hostname: input.hostname || "",
+      forcedSlug: input.forcedSlug as string | undefined,
+      ...handleBookingMeta,
+    });
     luckyUsers = firstBookingResult.luckyUsers;
   }
 
@@ -71,9 +80,7 @@ export const handleNewRecurringBooking = async (
     //   appsStatus = Object.values(calcAppsStatus);
     // }
 
-    const recurringEventReq: NextApiRequest & { userId?: number } = req;
-
-    recurringEventReq.body = {
+    const recurringEventData = {
       ...booking,
       appsStatus,
       allRecurringDates,
@@ -81,12 +88,16 @@ export const handleNewRecurringBooking = async (
       thirdPartyRecurringEventId,
       numSlotsToCheckForAvailability,
       currentRecurringIndex: key,
-      noEmail: req.noEmail !== undefined ? req.noEmail : key !== 0,
+      noEmail: input.noEmail !== undefined ? input.noEmail : key !== 0,
       luckyUsers,
     };
 
-    const promiseEachRecurringBooking: ReturnType<typeof handleNewBooking> =
-      handleNewBooking(recurringEventReq);
+    const promiseEachRecurringBooking: ReturnType<typeof handleNewBooking> = handleNewBooking({
+      hostname: input.hostname || "",
+      forcedSlug: input.forcedSlug as string | undefined,
+      bookingData: recurringEventData,
+      ...handleBookingMeta,
+    });
 
     const eachRecurringBooking = await promiseEachRecurringBooking;
 
@@ -94,7 +105,7 @@ export const handleNewRecurringBooking = async (
 
     if (!thirdPartyRecurringEventId) {
       if (eachRecurringBooking.references && eachRecurringBooking.references.length > 0) {
-        for (const reference of eachRecurringBooking.references!) {
+        for (const reference of eachRecurringBooking.references) {
           if (reference.thirdPartyRecurringEventId) {
             thirdPartyRecurringEventId = reference.thirdPartyRecurringEventId;
             break;
@@ -105,3 +116,32 @@ export const handleNewRecurringBooking = async (
   }
   return createdBookings;
 };
+
+export interface IRecurringBookingServiceDependencies {
+  regularBookingService: RegularBookingService;
+}
+
+/**
+ * Recurring Booking Service takes care of creating/rescheduling recurring bookings.
+ */
+export class RecurringBookingService implements IBookingService {
+  constructor(private readonly deps: IRecurringBookingServiceDependencies) {}
+
+  async createBooking(input: {
+    bookingData: CreateRecurringBookingData;
+    bookingMeta?: CreateBookingMeta;
+  }): Promise<BookingResponse[]> {
+    const handlerInput = { bookingData: input.bookingData, ...(input.bookingMeta || {}) };
+    // FOLLOW-UP: Pass on dependencies to the handler
+    return handleNewRecurringBooking(handlerInput);
+  }
+
+  async rescheduleBooking(input: {
+    bookingData: CreateRecurringBookingData;
+    bookingMeta?: CreateBookingMeta;
+  }): Promise<BookingResponse[]> {
+    const handlerInput = { bookingData: input.bookingData, ...(input.bookingMeta || {}) };
+    // FOLLOW-UP: Pass on dependencies to the handler
+    return handleNewRecurringBooking(handlerInput);
+  }
+}

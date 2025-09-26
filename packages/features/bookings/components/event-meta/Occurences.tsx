@@ -1,29 +1,29 @@
 import { useEffect, useState } from "react";
 
-import { useBookerStore } from "@calcom/features/bookings/Booker/store";
+import { useBookerStoreContext } from "@calcom/features/bookings/Booker/BookerStoreProvider";
 import type { BookerEvent } from "@calcom/features/bookings/types";
 import { useLocale } from "@calcom/lib/hooks/useLocale";
 import { parseRecurringDates } from "@calcom/lib/parse-dates";
 import { getRecurringFreq } from "@calcom/lib/recurringStrings";
-import { Tooltip, Alert } from "@calcom/ui";
-import { Input } from "@calcom/ui";
+import { Alert } from "@calcom/ui/components/alert";
+import { Input } from "@calcom/ui/components/form";
+import { Tooltip } from "@calcom/ui/components/tooltip";
 
-import { useTimePreferences } from "../../lib";
+import { useBookerTime } from "../../Booker/components/hooks/useBookerTime";
 
 export const EventOccurences = ({ event }: { event: Pick<BookerEvent, "recurringEvent"> }) => {
   const maxOccurences = event.recurringEvent?.count || null;
   const { t, i18n } = useLocale();
-  const [setRecurringEventCount, recurringEventCount, setOccurenceCount, occurenceCount] = useBookerStore(
-    (state) => [
+  const [setRecurringEventCount, recurringEventCount, setOccurenceCount, occurenceCount] =
+    useBookerStoreContext((state) => [
       state.setRecurringEventCount,
       state.recurringEventCount,
       state.setOccurenceCount,
       state.occurenceCount,
-    ]
-  );
-  const selectedTimeslot = useBookerStore((state) => state.selectedTimeslot);
-  const bookerState = useBookerStore((state) => state.state);
-  const { timezone, timeFormat } = useTimePreferences();
+    ]);
+  const selectedTimeslot = useBookerStoreContext((state) => state.selectedTimeslot);
+  const bookerState = useBookerStoreContext((state) => state.state);
+  const { timezone, timeFormat } = useBookerTime();
   const [warning, setWarning] = useState(false);
   // Set initial value in booker store.
   useEffect(() => {

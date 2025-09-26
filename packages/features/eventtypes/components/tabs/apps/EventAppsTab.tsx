@@ -1,26 +1,31 @@
-import { Trans } from "next-i18next";
 import Link from "next/link";
 import { useFormContext } from "react-hook-form";
 
 import { EventTypeAppCard } from "@calcom/app-store/_components/EventTypeAppCardInterface";
 import type { EventTypeAppCardComponentProps } from "@calcom/app-store/types";
 import type { EventTypeAppsList } from "@calcom/app-store/utils";
+import useAppsData from "@calcom/features/apps/hooks/useAppsData";
 import useLockedFieldsManager from "@calcom/features/ee/managed-event-types/hooks/useLockedFieldsManager";
 import type { FormValues, EventTypeSetupProps } from "@calcom/features/eventtypes/lib/types";
-import useAppsData from "@calcom/lib/hooks/useAppsData";
+import ServerTrans from "@calcom/lib/components/ServerTrans";
 import { useLocale } from "@calcom/lib/hooks/useLocale";
 import { trpc } from "@calcom/trpc/react";
-import { Alert, Button, EmptyScreen } from "@calcom/ui";
+import { Alert } from "@calcom/ui/components/alert";
+import { Button } from "@calcom/ui/components/button";
+import { EmptyScreen } from "@calcom/ui/components/empty-screen";
+import { Section } from "@calcom/ui/components/section";
 
 export type EventType = Pick<EventTypeSetupProps, "eventType">["eventType"] &
   EventTypeAppCardComponentProps["eventType"];
 
 export const EventAppsTab = ({ eventType }: { eventType: EventType }) => {
   const { t } = useLocale();
-  const { data: eventTypeApps, isPending } = trpc.viewer.integrations.useQuery({
+  const { data: eventTypeApps, isPending } = trpc.viewer.apps.integrations.useQuery({
     extendsFeature: "EventType",
     teamId: eventType.team?.id || eventType.parent?.teamId,
   });
+
+  const utils = trpc.useUtils();
 
   const formMethods = useFormContext<FormValues>();
   const installedApps =
@@ -37,6 +42,14 @@ export const EventAppsTab = ({ eventType }: { eventType: EventType }) => {
   });
   const appsDisableProps = shouldLockDisableProps("apps", { simple: true });
   const lockedText = appsDisableProps.isLocked ? "locked" : "unlocked";
+
+  const handleAppInstallSuccess = (appId: string) => () => {
+    utils.viewer.apps.appById.invalidate({ appId });
+    utils.viewer.apps.integrations.invalidate({
+      extendsFeature: "EventType",
+      ...(eventType.team?.id && { teamId: eventType.team.id }),
+    });
+  };
 
   const appsWithTeamCredentials = eventTypeApps?.items.filter((app) => app.teams.length) || [];
   const cardsForAppsWithTeams = appsWithTeamCredentials.map((app) => {
@@ -55,6 +68,7 @@ export const EventAppsTab = ({ eventType }: { eventType: EventType }) => {
           app={app}
           eventType={eventType}
           eventTypeFormMetadata={eventTypeFormMetadata}
+          onAppInstallSuccess={handleAppInstallSuccess(app.slug)}
         />
       );
     }
@@ -79,6 +93,7 @@ export const EventAppsTab = ({ eventType }: { eventType: EventType }) => {
             eventType={eventType}
             eventTypeFormMetadata={eventTypeFormMetadata}
             disabled={shouldLockDisableProps("apps").disabled}
+            onAppInstallSuccess={handleAppInstallSuccess(app.slug)}
           />
         );
       }
@@ -89,28 +104,25 @@ export const EventAppsTab = ({ eventType }: { eventType: EventType }) => {
   return (
     <>
       <div>
-        <div className="before:border-0">
+        <div className="flex flex-col gap-4 before:border-0">
           {(isManagedEventType || isChildrenManagedEventType) && (
             <Alert
-              severity={appsDisableProps.isLocked ? "neutral" : "green"}
+              severity={appsDisableProps.isLocked ? "neutral" : "info"}
               className="mb-2"
               title={
-                <Trans i18nKey={`${lockedText}_${isManagedEventType ? "for_members" : "by_team_admins"}`}>
-                  {lockedText[0].toUpperCase()}
-                  {lockedText.slice(1)} {isManagedEventType ? "for members" : "by team admins"}
-                </Trans>
+                <ServerTrans
+                  t={t}
+                  i18nKey={`${lockedText}_${isManagedEventType ? "for_members" : "by_team_admins"}`}
+                />
               }
               actions={<div className="flex h-full items-center">{appsDisableProps.LockedIcon}</div>}
               message={
-                <Trans
+                <ServerTrans
+                  t={t}
                   i18nKey={`apps_${lockedText}_${
                     isManagedEventType ? "for_members" : "by_team_admins"
-                  }_description`}>
-                  {isManagedEventType ? "Members" : "You"}{" "}
-                  {appsDisableProps.isLocked
-                    ? "will be able to see the active apps but will not be able to edit any app settings"
-                    : "will be able to see the active apps and will be able to edit any app settings"}
-                </Trans>
+                  }_description`}
+                />
               }
             />
           )}
@@ -147,29 +159,32 @@ export const EventAppsTab = ({ eventType }: { eventType: EventType }) => {
                   app={app}
                   eventType={eventType}
                   eventTypeFormMetadata={eventTypeFormMetadata}
+                  onAppInstallSuccess={handleAppInstallSuccess(app.slug)}
                 />
               );
           })}
         </div>
       </div>
+      {/* TODO: Add back after salesforce v3 dev */}
       {!appsDisableProps.disabled && (
-        <div className="bg-muted mt-6 rounded-md p-8">
+        <div className="bg-muted mt-4 rounded-2xl p-4">
           {!isPending && notInstalledApps?.length ? (
-            <>
-              <h2 className="text-emphasis mb-2 text-xl font-semibold leading-5 tracking-[0.01em]">
-                {t("available_apps_lower_case")}
-              </h2>
-              <p className="text-default mb-6 text-sm font-normal">
-                <Trans i18nKey="available_apps_desc">
-                  View popular apps below and explore more in our &nbsp;
-                  <Link className="cursor-pointer underline" href="/apps">
-                    App Store
-                  </Link>
-                </Trans>
-              </p>
-            </>
+            <div className="mb-4 flex flex-col">
+              <Section.Title>{t("available_apps_lower_case")}</Section.Title>
+              <Section.Description>
+                <ServerTrans
+                  t={t}
+                  i18nKey="available_apps_desc"
+                  components={[
+                    <Link key="available_apps_desc" className="cursor-pointer underline" href="/apps">
+                      App Store
+                    </Link>,
+                  ]}
+                />
+              </Section.Description>
+            </div>
           ) : null}
-          <div className="bg-default border-subtle divide-subtle divide-y rounded-md border before:border-0">
+          <div className="bg-default border-muted flex flex-col gap-4 rounded-xl border p-3">
             {notInstalledApps?.map((app) => (
               <EventTypeAppCard
                 getAppData={getAppDataGetter(app.slug as EventTypeAppsList)}
@@ -178,6 +193,7 @@ export const EventAppsTab = ({ eventType }: { eventType: EventType }) => {
                 app={app}
                 eventType={eventType}
                 eventTypeFormMetadata={eventTypeFormMetadata}
+                onAppInstallSuccess={handleAppInstallSuccess(app.slug)}
               />
             ))}
           </div>

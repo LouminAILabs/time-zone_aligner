@@ -1,67 +1,155 @@
 "use client";
 
+import { useState, useCallback } from "react";
+
+import {
+  DataTableProvider,
+  DataTableFilters,
+  DateRangeFilter,
+  ColumnFilterType,
+  type FilterableColumn,
+} from "@calcom/features/data-table";
+import { useDataTable } from "@calcom/features/data-table/hooks/useDataTable";
+import { useSegments } from "@calcom/features/data-table/hooks/useSegments";
 import {
   AverageEventDurationChart,
   BookingKPICards,
-  BookingStatusLineChart,
-  LeastBookedTeamMembersTable,
-  MostBookedTeamMembersTable,
-  PopularEventsTable,
+  BookingsByHourChart,
+  EventTrendsChart,
   HighestNoShowHostTable,
-  RecentFeedbackTable,
   HighestRatedMembersTable,
+  LeastBookedTeamMembersTable,
   LowestRatedMembersTable,
-} from "@calcom/features/insights/components";
-import { FiltersProvider } from "@calcom/features/insights/context/FiltersProvider";
-import { Filters } from "@calcom/features/insights/filters";
+  MostBookedTeamMembersTable,
+  MostCancelledBookingsTables,
+  MostCompletedTeamMembersTable,
+  LeastCompletedTeamMembersTable,
+  PopularEventsTable,
+  RecentNoShowGuestsChart,
+  RecentFeedbackTable,
+  TimezoneBadge,
+} from "@calcom/features/insights/components/booking";
+import { InsightsOrgTeamsProvider } from "@calcom/features/insights/context/InsightsOrgTeamsProvider";
+import { DateTargetSelector, type DateTarget } from "@calcom/features/insights/filters/DateTargetSelector";
+import { Download } from "@calcom/features/insights/filters/Download";
+import { OrgTeamsFilter } from "@calcom/features/insights/filters/OrgTeamsFilter";
+import { useInsightsBookings } from "@calcom/features/insights/hooks/useInsightsBookings";
+import { useInsightsOrgTeams } from "@calcom/features/insights/hooks/useInsightsOrgTeams";
 import { useLocale } from "@calcom/lib/hooks/useLocale";
+import { ButtonGroup } from "@calcom/ui/components/buttonGroup";
 
-import type { getServerSideProps } from "@lib/insights/getServerSideProps";
-import type { inferSSRProps } from "@lib/types/inferSSRProps";
+export default function InsightsPage({ timeZone }: { timeZone: string }) {
+  return (
+    <DataTableProvider useSegments={useSegments} timeZone={timeZone}>
+      <InsightsOrgTeamsProvider>
+        <InsightsPageContent />
+      </InsightsOrgTeamsProvider>
+    </DataTableProvider>
+  );
+}
 
-import InsightsLayout from "./layout";
+const createdAtColumn: Extract<FilterableColumn, { type: ColumnFilterType.DATE_RANGE }> = {
+  id: "createdAt",
+  title: "createdAt",
+  type: ColumnFilterType.DATE_RANGE,
+};
 
-export type PageProps = inferSSRProps<typeof getServerSideProps>;
+const startTimeColumn: Extract<FilterableColumn, { type: ColumnFilterType.DATE_RANGE }> = {
+  id: "startTime",
+  title: "startTime",
+  type: ColumnFilterType.DATE_RANGE,
+};
 
-export default function InsightsPage() {
+function InsightsPageContent() {
   const { t } = useLocale();
+  const { table } = useInsightsBookings();
+  const { isAll, teamId, userId } = useInsightsOrgTeams();
+  const { removeFilter } = useDataTable();
+  const [dateTarget, _setDateTarget] = useState<"startTime" | "createdAt">("startTime");
+
+  const setDateTarget = useCallback(
+    (target: "startTime" | "createdAt") => {
+      _setDateTarget(target);
+      removeFilter(target === "startTime" ? "createdAt" : "startTime");
+    },
+    [_setDateTarget, removeFilter]
+  );
 
   return (
-    <InsightsLayout>
-      <FiltersProvider>
-        <Filters />
+    <>
+      <div
+        className="flex flex-wrap items-center gap-2"
+        data-testid={`insights-filters-${isAll}-${teamId}-${userId}`}>
+        <OrgTeamsFilter />
+        <DataTableFilters.AddFilterButton table={table} hideWhenFilterApplied />
+        <DataTableFilters.ActiveFilters table={table} />
+        <DataTableFilters.AddFilterButton table={table} variant="sm" showWhenFilterApplied />
+        <DataTableFilters.ClearFiltersButton exclude={["startTime", "createdAt"]} />
+        <div className="grow" />
+        <Download />
+        <ButtonGroup combined>
+          <DateRangeFilter
+            column={dateTarget === "startTime" ? startTimeColumn : createdAtColumn}
+            options={{ convertToTimeZone: true }}
+          />
+          <DateTargetSelector value={dateTarget as DateTarget} onChange={setDateTarget} />
+        </ButtonGroup>
+        <TimezoneBadge />
+      </div>
 
-        <div className="mb-4 space-y-4">
-          <BookingKPICards />
+      <div className="my-4 space-y-4">
+        <BookingKPICards />
 
-          <BookingStatusLineChart />
+        <EventTrendsChart />
 
-          <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
-            <PopularEventsTable />
-
+        <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 md:grid-cols-4">
+          <div className="sm:col-span-2">
+            <BookingsByHourChart />
+          </div>
+          <div className="sm:col-span-2">
             <AverageEventDurationChart />
           </div>
-          <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
-            <MostBookedTeamMembersTable />
-            <LeastBookedTeamMembersTable />
-          </div>
-          <RecentFeedbackTable />
-          <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
-            <HighestNoShowHostTable />
-            <HighestRatedMembersTable />
-            <LowestRatedMembersTable />
-          </div>
-          <small className="text-default block text-center">
-            {t("looking_for_more_insights")}{" "}
-            <a
-              className="text-blue-500 hover:underline"
-              href="mailto:updates@cal.com?subject=Feature%20Request%3A%20More%20Analytics&body=Hey%20Cal.com%20Team%2C%20I%20love%20the%20analytics%20page%20but%20I%20am%20looking%20for%20...">
-              {" "}
-              {t("contact_support")}
-            </a>
-          </small>
         </div>
-      </FiltersProvider>
-    </InsightsLayout>
+
+        <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 md:grid-cols-4">
+          <MostBookedTeamMembersTable />
+          <LeastBookedTeamMembersTable />
+          <MostCompletedTeamMembersTable />
+          <LeastCompletedTeamMembersTable />
+        </div>
+
+        <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 md:grid-cols-4">
+          <MostCancelledBookingsTables />
+          <HighestNoShowHostTable />
+          <div className="sm:col-span-2">
+            <RecentNoShowGuestsChart />
+          </div>
+        </div>
+
+        <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 md:grid-cols-4">
+          <HighestRatedMembersTable />
+          <LowestRatedMembersTable />
+          <div className="sm:col-span-2">
+            <RecentFeedbackTable />
+          </div>
+        </div>
+
+        <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 md:grid-cols-4">
+          <div className="sm:col-span-2">
+            <PopularEventsTable />
+          </div>
+        </div>
+
+        <small className="text-default block text-center">
+          {t("looking_for_more_insights")}{" "}
+          <a
+            className="text-blue-500 hover:underline"
+            href="mailto:updates@cal.com?subject=Feature%20Request%3A%20More%20Analytics&body=Hey%20Cal.com%20Team%2C%20I%20love%20the%20analytics%20page%20but%20I%20am%20looking%20for%20...">
+            {" "}
+            {t("contact_support")}
+          </a>
+        </small>
+      </div>
+    </>
   );
 }

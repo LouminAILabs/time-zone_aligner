@@ -3,21 +3,17 @@ import { useForm } from "react-hook-form";
 
 import type { Dayjs } from "@calcom/dayjs";
 import dayjs from "@calcom/dayjs";
-import { classNames as cs } from "@calcom/lib";
-import { yyyymmdd } from "@calcom/lib/date-fns";
+import { BookerStoreProvider } from "@calcom/features/bookings/Booker/BookerStoreProvider";
+import { Dialog } from "@calcom/features/components/controlled-dialog";
+import { yyyymmdd } from "@calcom/lib/dayjs";
 import { useLocale } from "@calcom/lib/hooks/useLocale";
 import type { WorkingHours } from "@calcom/types/schedule";
-import {
-  Dialog,
-  DialogContent,
-  DialogTrigger,
-  DialogHeader,
-  DialogClose,
-  Switch,
-  showToast,
-  Form,
-  Button,
-} from "@calcom/ui";
+import cs from "@calcom/ui/classNames";
+import { Button } from "@calcom/ui/components/button";
+import { DialogContent, DialogHeader, DialogTrigger, DialogClose } from "@calcom/ui/components/dialog";
+import { Switch } from "@calcom/ui/components/form";
+import { Form } from "@calcom/ui/components/form";
+import { showToast } from "@calcom/ui/components/toast";
 
 import DatePicker from "../../calendars/DatePicker";
 import type { TimeRange } from "./Schedule";
@@ -141,19 +137,21 @@ const DateOverrideForm = ({
       className="p-6 sm:flex sm:p-0 xl:flex-row">
       <div className="sm:border-subtle w-full sm:border-r sm:p-4 sm:pr-6 md:p-8">
         <DialogHeader title={t("date_overrides_dialog_title")} />
-        <DatePicker
-          excludedDates={excludedDates}
-          weekStart={weekStart}
-          selected={selectedDates}
-          onChange={(day) => {
-            if (day) onDateChange(day);
-          }}
-          onMonthChange={(newMonth) => {
-            setBrowsingDate(newMonth);
-          }}
-          browsingDate={browsingDate}
-          locale={isLocaleReady ? i18n.language : "en"}
-        />
+        <BookerStoreProvider>
+          <DatePicker
+            excludedDates={excludedDates}
+            weekStart={weekStart}
+            selected={selectedDates}
+            onChange={(day) => {
+              if (day) onDateChange(day);
+            }}
+            onMonthChange={(newMonth) => {
+              setBrowsingDate(newMonth);
+            }}
+            browsingDate={browsingDate}
+            locale={isLocaleReady ? i18n.language : "en"}
+          />
+        </BookerStoreProvider>
       </div>
       <div className="relative mt-8 flex w-full flex-col sm:mt-0 sm:p-4 md:p-8">
         {selectedDates[0] ? (
@@ -186,7 +184,7 @@ const DateOverrideForm = ({
                 }}
                 disabled={selectedDates.length === 0}
                 data-testid="add-override-submit-btn">
-                {value ? t("date_overrides_update_btn") : t("date_overrides_add_btn")}
+                {value ? t("date_overrides_update_btn") : t("date_overrides_save_btn")}
               </Button>
               <DialogClose />
             </div>

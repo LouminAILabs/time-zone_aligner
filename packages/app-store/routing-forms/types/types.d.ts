@@ -1,7 +1,7 @@
-import type { App_RoutingForms_Form } from "@prisma/client";
 import type { ImmutableTree, Config } from "react-awesome-query-builder";
 import type z from "zod";
 
+import type { App_RoutingForms_Form } from "@calcom/prisma/client";
 import type { AttributeType } from "@calcom/prisma/client";
 import type { RoutingFormSettings } from "@calcom/prisma/zod-utils";
 
@@ -22,6 +22,7 @@ export type FormResponse = Record<
   {
     value: number | string | string[];
     label: string;
+    identifier?: string;
   }
 >;
 
@@ -69,6 +70,7 @@ export type Attribute = {
   slug: string;
   type: AttributeType;
   id: string;
+  isWeightsEnabled?: boolean;
   options: {
     id: string;
     value: string;
@@ -96,6 +98,17 @@ export type LocalRouteWithRaqbStates = LocalRoute & {
   formFieldsQueryBuilderState: FormFieldsQueryBuilderState;
   attributesQueryBuilderState: AttributesQueryBuilderState | null;
   fallbackAttributesQueryBuilderState: AttributesQueryBuilderState | null;
+  attributeIdForWeights?: string;
 };
 
 export type EditFormRoute = LocalRouteWithRaqbStates | GlobalRoute;
+
+export type RoutingFormWithResponseCount = RoutingForm & {
+  team: {
+    slug: Team["slug"];
+    name: Team["name"];
+  } | null;
+  _count: {
+    responses: number;
+  };
+};

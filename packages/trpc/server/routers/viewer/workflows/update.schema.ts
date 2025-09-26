@@ -1,9 +1,9 @@
 import { z } from "zod";
 
 import {
+  WORKFLOW_TEMPLATES,
   TIME_UNIT,
   WORKFLOW_ACTIONS,
-  WORKFLOW_TEMPLATES,
   WORKFLOW_TRIGGER_EVENTS,
 } from "@calcom/features/ee/workflows/lib/constants";
 
@@ -25,6 +25,7 @@ export const ZUpdateInputSchema = z.object({
       sender: z.string().nullable(),
       senderName: z.string().nullable(),
       includeCalendarEvent: z.boolean(),
+      agentId: z.string().nullish(),
     })
     .array(),
   trigger: z.enum(WORKFLOW_TRIGGER_EVENTS),

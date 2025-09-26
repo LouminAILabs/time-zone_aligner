@@ -9,17 +9,17 @@ import { UsersModule } from "@/modules/users/users.module";
 import { INestApplication } from "@nestjs/common";
 import { NestExpressApplication } from "@nestjs/platform-express";
 import { Test } from "@nestjs/testing";
-import { User, Team } from "@prisma/client";
 import * as request from "supertest";
 import { OrganizationRepositoryFixture } from "test/fixtures/repository/organization.repository.fixture";
 import { ProfileRepositoryFixture } from "test/fixtures/repository/profiles.repository.fixture";
 import { SchedulesRepositoryFixture } from "test/fixtures/repository/schedules.repository.fixture";
 import { UserRepositoryFixture } from "test/fixtures/repository/users.repository.fixture";
+import { randomString } from "test/utils/randomString";
 import { withApiAuth } from "test/utils/withApiAuth";
 
 import { SUCCESS_STATUS } from "@calcom/platform-constants";
-import { UserResponse } from "@calcom/platform-types";
-import { ApiSuccessResponse } from "@calcom/platform-types";
+import type { UserResponse, ApiSuccessResponse } from "@calcom/platform-types";
+import type { User, Team } from "@calcom/prisma/client";
 
 describe("Me Endpoints", () => {
   describe("User Authentication", () => {
@@ -29,7 +29,7 @@ describe("Me Endpoints", () => {
     let schedulesRepositoryFixture: SchedulesRepositoryFixture;
     let profilesRepositoryFixture: ProfileRepositoryFixture;
     let organizationsRepositoryFixture: OrganizationRepositoryFixture;
-    const userEmail = "me-controller-e2e@api.com";
+    const userEmail = `me-controller-user-${randomString()}@api.com`;
     let user: User;
     let org: Team;
 
@@ -58,7 +58,7 @@ describe("Me Endpoints", () => {
       });
 
       org = await organizationsRepositoryFixture.create({
-        name: "Test org team",
+        name: `me-controller-organization-${randomString()}`,
         isOrganization: true,
         isPlatform: true,
       });

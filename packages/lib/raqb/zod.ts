@@ -1,6 +1,20 @@
 import { z } from "zod";
 
 export const raqbChildSchema = z.object({
+  type: z.string().optional(),
+  properties: z
+    .object({
+      field: z.any().optional(),
+      operator: z.any().optional(),
+      value: z.any().optional(),
+      valueSrc: z.any().optional(),
+      valueError: z.array(z.union([z.string(), z.null()])).optional(),
+      valueType: z.any().optional(),
+    })
+    .optional(),
+  /*
+   * TODO: (emrysal) This schema is good, but our DB contains invalid entries-
+   *       instead of crashing on read we need to handle this on write first.
   type: z.union([z.literal("rule"), z.literal("rule_group")]),
   properties: z.object({
     // This is RAQB field that is used in the rules. The aluealue we provide here is used as a lookup key in RAQB_CONFIG.fields
@@ -21,7 +35,7 @@ export const raqbChildSchema = z.object({
     // Type of the value - can be text, number, boolean, date, time, datetime, select, multiselect, treeselect, treemultiselect and maybe more
     // We only use a few of them in our app
     valueType: z.array(z.string()).optional(),
-  }),
+  }),*/
 });
 
 // The actual schema of children1 is quite complex, we don't want to worry about that at the moment.
@@ -69,16 +83,52 @@ const raqbChildren1Schema = z
       }
     });
   });
+
+/**
+ * @example
+ * ```json
+ * {
+    "id": "9b8ba888-0123-4456-b89a-b1984020d699",
+    "type": "group",
+    "children1": {
+        "a8a89bba-89ab-4cde-b012-31984020ebaa": {
+            "type": "rule",
+            "properties": {
+                "field": "88be6104-d350-411d-aa0f-092b2deda257",
+                "operator": "multiselect_some_in",
+                "value": [
+                    [
+                        "{field:0bf77a89-2bd0-4df7-9648-758014ba3189}",
+                        "899c846d-7c02-43dc-9057-c3f8c118d41f"
+                    ]
+                ],
+                "valueSrc": [
+                    "value"
+                ],
+                "valueError": [
+                    null
+                ],
+                  "valueType": [
+                      "multiselect"
+                  ]
+              }
+          }
+      }
+  }
+ * ```
+ */
 export const raqbQueryValueSchema = z.union([
   z.object({
     id: z.string().optional(),
     type: z.literal("group"),
     children1: raqbChildren1Schema.optional(),
+    properties: z.any(),
   }),
   z.object({
     id: z.string().optional(),
     type: z.literal("switch_group"),
     children1: raqbChildren1Schema.optional(),
+    properties: z.any(),
   }),
 ]);
 

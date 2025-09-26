@@ -1,15 +1,14 @@
-import { Prisma } from "@prisma/client";
-
 import type { Dayjs } from "@calcom/dayjs";
 import dayjs from "@calcom/dayjs";
 import type { DateRange } from "@calcom/lib/date-ranges";
 import { buildDateRanges } from "@calcom/lib/date-ranges";
 import { UserRepository } from "@calcom/lib/server/repository/user";
 import { prisma } from "@calcom/prisma";
+import { Prisma } from "@calcom/prisma/client";
 
 import { TRPCError } from "@trpc/server";
 
-import type { TrpcSessionUser } from "../../../../trpc";
+import type { TrpcSessionUser } from "../../../../types";
 import type { TListTeamAvailaiblityScheme } from "./listTeamAvailability.schema";
 
 type GetOptions = {
@@ -67,17 +66,16 @@ async function getTeamMembers({
     },
     cursor: cursor ? { id: cursor } : undefined,
     take: limit + 1, // We take +1 as itll be used for the next cursor
-    orderBy: {
-      id: "asc",
-    },
+    orderBy: [{ userId: "asc" }, { id: "asc" }], // Prisma require a unique field for tie breaking duplicate value for pagination
     distinct: ["userId"],
   });
 
+  const userRepo = new UserRepository(prisma);
   const membershipWithUserProfile = [];
   for (const membership of memberships) {
     membershipWithUserProfile.push({
       ...membership,
-      user: await UserRepository.enrichUserWithItsProfile({
+      user: await userRepo.enrichUserWithItsProfile({
         user: membership.user,
       }),
     });
@@ -146,15 +144,6 @@ async function getInfoForAllTeams({ ctx, input }: GetOptions) {
     .findMany({
       where: {
         userId: ctx.user.id,
-        ...(searchString
-          ? {
-              OR: [
-                { user: { username: { contains: searchString } } },
-                { user: { name: { contains: searchString } } },
-                { user: { email: { contains: searchString } } },
-              ],
-            }
-          : {}),
       },
       select: {
         id: true,
@@ -203,10 +192,12 @@ export const listTeamAvailabilityHandler = async ({ ctx, input }: GetOptions) =>
     teamMembers = teamAllInfo.teamMembers;
     totalTeamMembers = teamAllInfo.totalTeamMembers;
   } else {
-    const isMember = await prisma.membership.findFirst({
+    const isMember = await prisma.membership.findUnique({
       where: {
-        teamId,
-        userId: ctx.user.id,
+        userId_teamId: {
+          userId: ctx.user.id,
+          teamId,
+        },
       },
     });
 

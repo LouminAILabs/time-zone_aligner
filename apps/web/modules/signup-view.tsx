@@ -3,7 +3,6 @@
 import { Analytics as DubAnalytics } from "@dub/analytics/react";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { signIn } from "next-auth/react";
-import { Trans } from "next-i18next";
 import dynamic from "next/dynamic";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
@@ -11,19 +10,18 @@ import Script from "next/script";
 import { useState, useEffect } from "react";
 import type { SubmitHandler } from "react-hook-form";
 import { useForm, useFormContext } from "react-hook-form";
-import { Toaster } from "react-hot-toast";
+import { Toaster } from "sonner";
 import { z } from "zod";
 
 import getStripe from "@calcom/app-store/stripepayment/lib/client";
 import { getPremiumPlanPriceValue } from "@calcom/app-store/stripepayment/lib/utils";
 import { getOrgUsernameFromEmail } from "@calcom/features/auth/signup/utils/getOrgUsernameFromEmail";
 import { getOrgFullOrigin } from "@calcom/features/ee/organizations/lib/orgDomains";
-import { classNames } from "@calcom/lib";
+import ServerTrans from "@calcom/lib/components/ServerTrans";
 import {
   APP_NAME,
   URL_PROTOCOL_REGEX,
   IS_CALCOM,
-  IS_EUROPE,
   WEBAPP_URL,
   CLOUDFLARE_SITE_ID,
   WEBSITE_PRIVACY_POLICY_URL,
@@ -36,29 +34,26 @@ import { pushGTMEvent } from "@calcom/lib/gtm";
 import { useCompatSearchParams } from "@calcom/lib/hooks/useCompatSearchParams";
 import { useDebounce } from "@calcom/lib/hooks/useDebounce";
 import { useLocale } from "@calcom/lib/hooks/useLocale";
-import { collectPageParameters, telemetryEventTypes, useTelemetry } from "@calcom/lib/telemetry";
+import { useTelemetry } from "@calcom/lib/hooks/useTelemetry";
+import { collectPageParameters, telemetryEventTypes } from "@calcom/lib/telemetry";
+import { IS_EUROPE } from "@calcom/lib/timezoneConstants";
 import { signupSchema as apiSignupSchema } from "@calcom/prisma/zod-utils";
 import type { inferSSRProps } from "@calcom/types/inferSSRProps";
-import {
-  Button,
-  HeadSeo,
-  PasswordField,
-  TextField,
-  Form,
-  Alert,
-  CheckboxField,
-  Icon,
-  showToast,
-} from "@calcom/ui";
+import classNames from "@calcom/ui/classNames";
+import { Alert } from "@calcom/ui/components/alert";
+import { Button } from "@calcom/ui/components/button";
+import { PasswordField, CheckboxField, TextField, Form } from "@calcom/ui/components/form";
+import { Icon } from "@calcom/ui/components/icon";
+import { showToast } from "@calcom/ui/components/toast";
 
 import type { getServerSideProps } from "@lib/signup/getServerSideProps";
 
 const signupSchema = apiSignupSchema.extend({
-  apiError: z.string().optional(), // Needed to display API errors doesnt get passed to the API
+  apiError: z.string().optional(), // Needed to display API errors doesn't get passed to the API
   cfToken: z.string().optional(),
 });
 
-const TurnstileCaptcha = dynamic(() => import("@components/auth/Turnstile"), { ssr: false });
+const TurnstileCaptcha = dynamic(() => import("@calcom/features/auth/Turnstile"), { ssr: false });
 
 type FormValues = z.infer<typeof signupSchema>;
 
@@ -87,6 +82,17 @@ const FEATURES = [
     },
   },
 ];
+
+function truncateDomain(domain: string) {
+  const maxLength = 25;
+  const cleanDomain = domain.replace(URL_PROTOCOL_REGEX, "");
+
+  if (cleanDomain.length <= maxLength) {
+    return cleanDomain;
+  }
+
+  return `${cleanDomain.substring(0, maxLength - 3)}.../`;
+}
 
 function UsernameField({
   username,
@@ -136,7 +142,6 @@ function UsernameField({
         {...props}
         {...register("username")}
         data-testid="signup-usernamefield"
-        addOnFilled={false}
       />
       {(!formState.isSubmitting || !formState.isSubmitted) && (
         <div className="text-gray text-default flex items-center text-sm">
@@ -152,6 +157,7 @@ function UsernameField({
                 <p>
                   {t("premium_username", {
                     price: getPremiumPlanPriceValue(),
+                    interpolation: { escapeValue: false },
                   })}
                 </p>
               </div>
@@ -202,6 +208,7 @@ export default function Signup({
 
   useEffect(() => {
     if (redirectUrl) {
+      // eslint-disable-next-line @calcom/eslint/avoid-web-storage
       localStorage.setItem("onBoardingRedirect", redirectUrl);
     }
   }, [redirectUrl]);
@@ -221,7 +228,6 @@ export default function Signup({
       if (err.checkoutSessionId) {
         const stripe = await getStripe();
         if (stripe) {
-          console.log("Redirecting to stripe checkout");
           const { error } = await stripe.redirectToCheckout({
             sessionId: err.checkoutSessionId,
           });
@@ -303,6 +309,9 @@ export default function Signup({
             <>
               <Script
                 id="gtm-init-script"
+                // It is strictly not necessary to disable, but in a future update of react/no-danger this will error.
+                // And we don't want it to error here anyways
+                // eslint-disable-next-line react/no-danger
                 dangerouslySetInnerHTML={{
                   __html: `(function (w, d, s, l, i) {
                         w[l] = w[l] || []; w[l].push({ 'gtm.start': new Date().getTime(), event: 'gtm.js' });
@@ -312,6 +321,7 @@ export default function Signup({
                 }}
               />
               <noscript
+                // eslint-disable-next-line react/no-danger
                 dangerouslySetInnerHTML={{
                   __html: `<iframe src="https://www.googletagmanager.com/ns.html?id=${process.env.NEXT_PUBLIC_GTM_ID}" height="0" width="0" style="display:none;visibility:hidden"></iframe>`,
                 }}
@@ -319,8 +329,12 @@ export default function Signup({
             </>
           )}
           <DubAnalytics
+            apiHost="/_proxy/dub"
             cookieOptions={{
               domain: isENVDev ? undefined : `.${new URL(WEBSITE_URL).hostname}`,
+            }}
+            domainsConfig={{
+              refer: "refer.cal.com",
             }}
           />
         </>
@@ -333,7 +347,6 @@ export default function Signup({
           "[--cal-brand-emphasis:#101010] dark:[--cal-brand-emphasis:#e1e1e1] "
         )}>
         <div className="bg-muted 2xl:border-subtle grid w-full max-w-[1440px] grid-cols-1 grid-rows-1 overflow-hidden lg:grid-cols-2 2xl:rounded-[20px] 2xl:border 2xl:py-6">
-          <HeadSeo title={t("sign_up")} description={t("sign_up")} />
           {/* Left side */}
           <div className="ml-auto mr-auto mt-0 flex w-full max-w-xl flex-col px-4 pt-6 sm:px-16 md:px-20 lg:mt-24 2xl:px-28">
             {displayBackButton && (
@@ -396,19 +409,26 @@ export default function Signup({
                       setPremium={(value) => setPremiumUsername(value)}
                       addOnLeading={
                         orgSlug
-                          ? `${getOrgFullOrigin(orgSlug, { protocol: true }).replace(
-                              URL_PROTOCOL_REGEX,
-                              ""
-                            )}/`
-                          : `${process.env.NEXT_PUBLIC_WEBSITE_URL.replace(URL_PROTOCOL_REGEX, "")}/`
+                          ? truncateDomain(
+                              `${getOrgFullOrigin(orgSlug, { protocol: true }).replace(
+                                URL_PROTOCOL_REGEX,
+                                ""
+                              )}/`
+                            )
+                          : truncateDomain(
+                              `${process.env.NEXT_PUBLIC_WEBSITE_URL.replace(URL_PROTOCOL_REGEX, "")}/`
+                            )
                       }
                     />
                   ) : null}
                   {/* Email */}
                   <TextField
+                    id="signup-email"
                     {...register("email")}
                     label={t("email")}
+                    placeholder="john@doe.com"
                     type="email"
+                    autoComplete="email"
                     disabled={prepopulateFormValues?.email}
                     data-testid="signup-emailfield"
                   />
@@ -416,7 +436,9 @@ export default function Signup({
                   {/* Password */}
                   {!isSamlSignup && (
                     <PasswordField
+                      id="signup-password"
                       data-testid="signup-passwordfield"
+                      autoComplete="new-password"
                       label={t("password")}
                       {...register("password")}
                       hintErrors={["caplow", "min", "num"]}
@@ -464,6 +486,7 @@ export default function Signup({
                           showToast("error", t("username_required"));
                           return;
                         }
+                        // eslint-disable-next-line @calcom/eslint/avoid-web-storage
                         localStorage.setItem("username", username);
                         const sp = new URLSearchParams();
                         // @NOTE: don't remove username query param as it's required right now for stripe payment page
@@ -500,8 +523,8 @@ export default function Signup({
                         usernameTaken
                       }>
                       {premiumUsername && !usernameTaken
-                        ? `${t("create_account")} (${getPremiumPlanPriceValue()})`
-                        : t("create_account")}
+                        ? `${t("get_started")} (${getPremiumPlanPriceValue()})`
+                        : t("get_started")}
                     </Button>
                   )}
                 </Form>
@@ -533,6 +556,7 @@ export default function Signup({
                         if (prepopulateFormValues?.username) {
                           // If username is present we save it in query params to check for premium
                           searchQueryParams.set("username", prepopulateFormValues.username);
+                          // eslint-disable-next-line @calcom/eslint/avoid-web-storage
                           localStorage.setItem("username", prepopulateFormValues.username);
                         }
                         if (token) {
@@ -601,7 +625,8 @@ export default function Signup({
                   </Link>
                 </div>
                 <div className="text-subtle">
-                  <Trans
+                  <ServerTrans
+                    t={t}
                     i18nKey="signing_up_terms"
                     components={[
                       <Link
@@ -684,25 +709,23 @@ export default function Signup({
               />
             </div>
             <div className="mr-12 mt-8 hidden h-full w-full grid-cols-3 gap-4 overflow-hidden lg:grid">
-              {FEATURES.map((feature) => (
-                <>
-                  <div className="max-w-52 mb-8 flex flex-col leading-none sm:mb-0">
-                    <div className="text-emphasis items-center">
-                      <Icon name={feature.icon} className="mb-1 h-4 w-4" />
-                      <span className="text-sm font-medium">{t(feature.title)}</span>
-                    </div>
-                    <div className="text-subtle text-sm">
-                      <p>
-                        {t(
-                          feature.description,
-                          feature.i18nOptions && {
-                            ...feature.i18nOptions,
-                          }
-                        )}
-                      </p>
-                    </div>
+              {FEATURES.map((feature, index) => (
+                <div key={index} className="max-w-52 mb-8 flex flex-col leading-none sm:mb-0">
+                  <div className="text-emphasis items-center">
+                    <Icon name={feature.icon} className="mb-1 h-4 w-4" />
+                    <span className="text-sm font-medium">{t(feature.title)}</span>
                   </div>
-                </>
+                  <div className="text-subtle text-sm">
+                    <p>
+                      {t(
+                        feature.description,
+                        feature.i18nOptions && {
+                          ...feature.i18nOptions,
+                        }
+                      )}
+                    </p>
+                  </div>
+                </div>
               ))}
             </div>
           </div>

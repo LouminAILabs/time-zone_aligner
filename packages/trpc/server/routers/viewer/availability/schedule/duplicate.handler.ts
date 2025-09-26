@@ -1,10 +1,9 @@
-import type { Prisma } from "@prisma/client";
-
 import { prisma } from "@calcom/prisma";
+import type { Prisma } from "@calcom/prisma/client";
 
 import { TRPCError } from "@trpc/server";
 
-import type { TrpcSessionUser } from "../../../../trpc";
+import type { TrpcSessionUser } from "../../../../types";
 import type { TScheduleDuplicateSchema } from "./duplicate.schema";
 
 type DuplicateScheduleOptions = {

@@ -1,13 +1,12 @@
-import type { Prisma } from "@prisma/client";
-
 import { hasFilter } from "@calcom/features/filters/lib/hasFilter";
 import { checkRateLimitAndThrowError } from "@calcom/lib/checkRateLimitAndThrowError";
 import logger from "@calcom/lib/logger";
-import { EventTypeRepository } from "@calcom/lib/server/repository/eventType";
+import { EventTypeRepository } from "@calcom/lib/server/repository/eventTypeRepository";
 import { prisma } from "@calcom/prisma";
 import type { PrismaClient } from "@calcom/prisma";
+import type { Prisma } from "@calcom/prisma/client";
 
-import type { TrpcSessionUser } from "../../../trpc";
+import type { TrpcSessionUser } from "../../../types";
 import type { TGetEventTypesFromGroupSchema } from "./getByViewer.schema";
 import { mapEventType } from "./util";
 
@@ -21,7 +20,7 @@ type GetByViewerOptions = {
   input: TGetEventTypesFromGroupSchema;
 };
 
-type EventType = Awaited<ReturnType<typeof EventTypeRepository.findAllByUpId>>[number];
+type EventType = Awaited<ReturnType<EventTypeRepository["findAllByUpId"]>>[number];
 type MappedEventType = Awaited<ReturnType<typeof mapEventType>>;
 
 export const getEventTypesFromGroup = async ({
@@ -47,6 +46,7 @@ export const getEventTypesFromGroup = async ({
     !isFilterSet || isUpIdInFilter || (isFilterSet && filters?.upIds && !isUpIdInFilter);
 
   const eventTypes: EventType[] = [];
+  const eventTypeRepo = new EventTypeRepository(ctx.prisma);
 
   if (shouldListUserEvents || !teamId) {
     const baseQueryConditions = {
@@ -56,7 +56,7 @@ export const getEventTypesFromGroup = async ({
     };
 
     const [nonChildEventTypes, childEventTypes] = await Promise.all([
-      EventTypeRepository.findAllByUpId(
+      eventTypeRepo.findAllByUpId(
         {
           upId: userProfile.upId,
           userId: ctx.user.id,
@@ -71,14 +71,14 @@ export const getEventTypesFromGroup = async ({
               position: "desc",
             },
             {
-              id: "asc",
+              id: "desc",
             },
           ],
           limit,
           cursor,
         }
       ),
-      EventTypeRepository.findAllByUpId(
+      eventTypeRepo.findAllByUpId(
         {
           upId: userProfile.upId,
           userId: ctx.user.id,
@@ -94,7 +94,7 @@ export const getEventTypesFromGroup = async ({
               position: "desc",
             },
             {
-              id: "asc",
+              id: "desc",
             },
           ],
           limit,
@@ -108,8 +108,8 @@ export const getEventTypesFromGroup = async ({
       if (a.position !== b.position) {
         return b.position - a.position;
       }
-      // Then by id in ascending order
-      return a.id - b.id;
+      // Then by id in descending order
+      return b.id - a.id;
     });
 
     eventTypes.push(...userEventTypes);
@@ -117,7 +117,7 @@ export const getEventTypesFromGroup = async ({
 
   if (teamId) {
     const teamEventTypes =
-      (await EventTypeRepository.findTeamEventTypes({
+      (await eventTypeRepo.findTeamEventTypes({
         teamId,
         parentId,
         userId: ctx.user.id,
@@ -136,7 +136,7 @@ export const getEventTypesFromGroup = async ({
             position: "desc",
           },
           {
-            id: "asc",
+            id: "desc",
           },
         ],
       })) ?? [];
@@ -172,6 +172,7 @@ export const getEventTypesFromGroup = async ({
     mappedEventTypes.forEach((evType) => {
       evType.users = [];
       evType.hosts = [];
+      evType.children = [];
     });
 
   return { eventTypes: mappedEventTypes, nextCursor: nextCursor ?? undefined };

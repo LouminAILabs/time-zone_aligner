@@ -1,42 +1,46 @@
-import { Injectable } from "@nestjs/common";
-import type { EventType, User, Schedule, DestinationCalendar } from "@prisma/client";
-
 import {
-  EventTypeMetaDataSchema,
-  userMetadata,
   transformLocationsInternalToApi,
   transformBookingFieldsInternalToApi,
-  parseRecurringEvent,
   InternalLocationSchema,
   SystemField,
   CustomField,
-  parseBookingLimit,
   transformIntervalLimitsInternalToApi,
   transformFutureBookingLimitsInternalToApi,
   transformRecurrenceInternalToApi,
   transformBookerLayoutsInternalToApi,
   transformRequiresConfirmationInternalToApi,
   transformEventTypeColorsInternalToApi,
-  parseEventTypeColor,
   transformSeatsInternalToApi,
   InternalLocation,
   BookingFieldSchema,
-} from "@calcom/platform-libraries";
+} from "@/ee/event-types/event-types_2024_06_14/transformers";
+import { Injectable } from "@nestjs/common";
+
 import {
+  userMetadata,
+  parseBookingLimit,
+  parseRecurringEvent,
+  getBookingFieldsWithSystemFields,
+} from "@calcom/platform-libraries";
+import { EventTypeMetaDataSchema, parseEventTypeColor } from "@calcom/platform-libraries/event-types";
+import type {
   TransformFutureBookingsLimitSchema_2024_06_14,
   BookerLayoutsTransformedSchema,
   NoticeThresholdTransformedSchema,
   EventTypeOutput_2024_06_14,
   OutputUnknownLocation_2024_06_14,
   OutputUnknownBookingField_2024_06_14,
+  OutputBookingField_2024_06_14,
 } from "@calcom/platform-types";
+import type { EventType, User, Schedule, DestinationCalendar, CalVideoSettings } from "@calcom/prisma/client";
 
 type EventTypeRelations = {
   users: User[];
   schedule: Schedule | null;
   destinationCalendar?: DestinationCalendar | null;
+  calVideoSettings?: CalVideoSettings | null;
 };
-export type DatabaseEventType = EventType & EventTypeRelations;
+export type DatabaseEventType = Omit<EventType, "allowReschedulingCancelledBookings"> & EventTypeRelations;
 
 type Input = Pick<
   DatabaseEventType,
@@ -84,11 +88,19 @@ type Input = Pick<
   | "destinationCalendar"
   | "useEventTypeDestinationCalendarEmail"
   | "hideCalendarEventDetails"
+  | "hideOrganizerEmail"
+  | "calVideoSettings"
+  | "hidden"
+  | "bookingRequiresAuthentication"
 >;
 
 @Injectable()
 export class OutputEventTypesService_2024_06_14 {
-  getResponseEventType(ownerId: number, databaseEventType: Input): EventTypeOutput_2024_06_14 {
+  getResponseEventType(
+    ownerId: number,
+    databaseEventType: Input,
+    isOrgTeamEvent: boolean
+  ): EventTypeOutput_2024_06_14 {
     const {
       id,
       length,
@@ -116,13 +128,18 @@ export class OutputEventTypesService_2024_06_14 {
       seatsShowAttendees,
       useEventTypeDestinationCalendarEmail,
       hideCalendarEventDetails,
+      hideOrganizerEmail,
+      calVideoSettings,
+      hidden,
+      bookingRequiresAuthentication,
     } = databaseEventType;
 
     const locations = this.transformLocations(databaseEventType.locations);
     const customName = databaseEventType?.eventName ?? undefined;
     const bookingFields = databaseEventType.bookingFields
       ? this.transformBookingFields(databaseEventType.bookingFields)
-      : [];
+      : this.getDefaultBookingFields(isOrgTeamEvent);
+
     const recurrence = this.transformRecurringEvent(databaseEventType.recurringEvent);
     const metadata = this.transformMetadata(databaseEventType.metadata) || {};
     const users = this.transformUsers(databaseEventType.users || []);
@@ -189,16 +206,20 @@ export class OutputEventTypesService_2024_06_14 {
       destinationCalendar,
       useDestinationCalendarEmail: useEventTypeDestinationCalendarEmail,
       hideCalendarEventDetails,
+      hideOrganizerEmail,
+      calVideoSettings,
+      hidden,
+      bookingRequiresAuthentication,
     };
   }
 
-  transformLocations(locations: any) {
-    if (!locations) return [];
+  transformLocations(locationDb: any) {
+    if (!locationDb) return [];
 
     const knownLocations: InternalLocation[] = [];
     const unknownLocations: OutputUnknownLocation_2024_06_14[] = [];
 
-    for (const location of locations) {
+    for (const location of locationDb) {
       const result = InternalLocationSchema.safeParse(location);
       if (result.success) {
         knownLocations.push(result.data);
@@ -233,11 +254,23 @@ export class OutputEventTypesService_2024_06_14 {
           type: "unknown",
           slug: "unknown",
           bookingField: JSON.stringify(bookingField),
-        });
+        } satisfies OutputUnknownBookingField_2024_06_14);
       }
     }
 
     return [...transformBookingFieldsInternalToApi(knownBookingFields), ...unknownBookingFields];
+  }
+
+  getDefaultBookingFields(isOrgTeamEvent: boolean) {
+    const defaultBookingFields = getBookingFieldsWithSystemFields({
+      disableGuests: false,
+      bookingFields: null,
+      customInputs: [],
+      metadata: null,
+      workflows: [],
+      isOrgTeamEvent,
+    });
+    return this.transformBookingFields(defaultBookingFields);
   }
 
   transformRecurringEvent(recurringEvent: any) {
@@ -297,6 +330,7 @@ export class OutputEventTypesService_2024_06_14 {
   transformEventTypeColor(eventTypeColor: any) {
     if (!eventTypeColor) return undefined;
     const parsedeventTypeColor = parseEventTypeColor(eventTypeColor);
+    if (!parsedeventTypeColor) return undefined;
     return transformEventTypeColorsInternalToApi(parsedeventTypeColor);
   }
 
@@ -310,5 +344,27 @@ export class OutputEventTypesService_2024_06_14 {
       seatsShowAttendees: !!seatsShowAttendees,
       seatsShowAvailabilityCount: !!seatsShowAvailabilityCount,
     });
+  }
+
+  getResponseEventTypesWithoutHiddenFields(
+    eventTypes: EventTypeOutput_2024_06_14[]
+  ): EventTypeOutput_2024_06_14[] {
+    return eventTypes.map((eventType) => this.getResponseEventTypeWithoutHiddenFields(eventType));
+  }
+
+  getResponseEventTypeWithoutHiddenFields(eventType: EventTypeOutput_2024_06_14): EventTypeOutput_2024_06_14 {
+    if (!Array.isArray(eventType?.bookingFields) || eventType.bookingFields.length === 0) return eventType;
+
+    const visibleBookingFields: OutputBookingField_2024_06_14[] = [];
+    for (const bookingField of eventType.bookingFields) {
+      if ("hidden" in bookingField && bookingField.hidden === true) {
+        continue;
+      }
+      visibleBookingFields.push(bookingField);
+    }
+    return {
+      ...eventType,
+      bookingFields: visibleBookingFields,
+    };
   }
 }

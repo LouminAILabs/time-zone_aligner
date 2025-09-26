@@ -2,17 +2,19 @@
 import { cloneDeep } from "lodash";
 import { uuid } from "short-uuid";
 
-import EventManager from "@calcom/core/EventManager";
+import { eventTypeAppMetadataOptionalSchema } from "@calcom/app-store/zod-utils";
 import { sendScheduledSeatsEmailsAndSMS } from "@calcom/emails";
 import { refreshCredentials } from "@calcom/features/bookings/lib/getAllCredentialsForUsersOnEvent/refreshCredentials";
+import { handlePayment } from "@calcom/features/bookings/lib/handlePayment";
 import {
   allowDisablingAttendeeConfirmationEmails,
   allowDisablingHostConfirmationEmails,
 } from "@calcom/features/ee/workflows/lib/allowDisablingStandardEmails";
+import EventManager from "@calcom/features/bookings/lib/EventManager";
 import { ErrorCode } from "@calcom/lib/errorCodes";
 import { HttpError } from "@calcom/lib/http-error";
-import { handlePayment } from "@calcom/lib/payment/handlePayment";
 import prisma from "@calcom/prisma";
+import type { Prisma } from "@calcom/prisma/client";
 import { BookingStatus } from "@calcom/prisma/enums";
 
 import { findBookingQuery } from "../../handleNewBooking/findBookingQuery";
@@ -47,8 +49,6 @@ const createNewSeat = async (
     return { ...attendee, language: { translate: tAttendees, locale: attendeeLanguage ?? "en" } };
   });
 
-  evt = { ...evt, attendees: [...bookingAttendees, invitee[0]] };
-
   if (
     eventType.seatsPerTimeSlot &&
     eventType.seatsPerTimeSlot <= seatedBooking.attendees.filter((attendee) => !!attendee.bookingSeat).length
@@ -74,9 +74,6 @@ const createNewSeat = async (
   await prisma.booking.update({
     where: {
       uid: seatedBooking.uid,
-    },
-    include: {
-      attendees: true,
     },
     data: {
       attendees: {
@@ -107,8 +104,16 @@ const createNewSeat = async (
     },
   });
 
-  evt.attendeeSeatId = attendeeUniqueId;
+  const newBookingSeat = await prisma.bookingSeat.findUnique({
+    where: {
+      referenceUid: attendeeUniqueId,
+    },
+  });
 
+  const attendeeWithSeat = { ...inviteeToAdd, bookingSeat: newBookingSeat ?? null };
+
+  evt = { ...evt, attendees: [...bookingAttendees, attendeeWithSeat] };
+  evt.attendeeSeatId = attendeeUniqueId;
   const newSeat = seatedBooking.attendees.length !== 0;
 
   /**
@@ -147,7 +152,8 @@ const createNewSeat = async (
     );
   }
   const credentials = await refreshCredentials(allCredentials);
-  const eventManager = new EventManager({ ...organizerUser, credentials }, eventType?.metadata?.apps);
+  const apps = eventTypeAppMetadataOptionalSchema.parse(eventType?.metadata?.apps);
+  const eventManager = new EventManager({ ...organizerUser, credentials }, apps);
   await eventManager.updateCalendarAttendees(evt, seatedBooking);
 
   const foundBooking = await findBookingQuery(seatedBooking.id);
@@ -185,15 +191,23 @@ const createNewSeat = async (
       throw new HttpError({ statusCode: 400, message: ErrorCode.MissingPaymentAppId });
     }
 
-    const payment = await handlePayment(
+    const payment = await handlePayment({
       evt,
-      eventType,
-      eventTypePaymentAppCredential as IEventTypePaymentCredentialType,
-      seatedBooking,
-      fullName,
+      selectedEventType: {
+        ...eventType,
+        metadata: eventType.metadata
+          ? {
+              ...eventType.metadata,
+              apps: eventType.metadata?.apps as Prisma.JsonValue,
+            }
+          : {},
+      },
+      paymentAppCredentials: eventTypePaymentAppCredential as IEventTypePaymentCredentialType,
+      booking: seatedBooking,
+      bookerName: fullName,
       bookerEmail,
-      bookerPhoneNumber
-    );
+      bookerPhoneNumber,
+    });
 
     resultBooking = { ...foundBooking };
     resultBooking["message"] = "Payment required";

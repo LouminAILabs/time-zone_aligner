@@ -1,9 +1,9 @@
 import { expect } from "@playwright/test";
-import type Prisma from "@prisma/client";
 
+import { eventTypeMetaDataSchemaWithTypedApps } from "@calcom/app-store/zod-utils";
 import prisma from "@calcom/prisma";
+import type Prisma from "@calcom/prisma/client";
 import { SchedulingType } from "@calcom/prisma/enums";
-import { EventTypeMetaDataSchema } from "@calcom/prisma/zod-utils";
 
 import { test, todo } from "./lib/fixtures";
 import type { Fixtures } from "./lib/fixtures";
@@ -51,7 +51,7 @@ test.describe("Stripe integration skip true", () => {
       },
     });
 
-    const metadata = EventTypeMetaDataSchema.parse(eventTypeMetadata?.metadata);
+    const metadata = eventTypeMetaDataSchemaWithTypedApps.parse(eventTypeMetadata?.metadata);
 
     const stripeAppMetadata = metadata?.apps?.stripe;
 
@@ -93,7 +93,7 @@ test.describe("Stripe integration skip true", () => {
       },
     });
 
-    const metadata = EventTypeMetaDataSchema.parse(eventTypeMetadata?.metadata);
+    const metadata = eventTypeMetaDataSchemaWithTypedApps.parse(eventTypeMetadata?.metadata);
 
     const stripeAppMetadata = metadata?.apps?.stripe;
 
@@ -291,7 +291,7 @@ test.describe("Stripe integration with the new app install flow skip false", () 
     });
 
     for (const eventTypeMetadata of eventTypeMetadatas) {
-      const metadata = EventTypeMetaDataSchema.parse(eventTypeMetadata?.metadata);
+      const metadata = eventTypeMetaDataSchemaWithTypedApps.parse(eventTypeMetadata?.metadata);
       const stripeAppMetadata = metadata?.apps?.stripe;
       expect(stripeAppMetadata).toHaveProperty("credentialId");
       expect(typeof stripeAppMetadata?.credentialId).toBe("number");
@@ -328,7 +328,7 @@ test.describe("Stripe integration with the new app install flow skip false", () 
       },
     });
 
-    const metadata = EventTypeMetaDataSchema.parse(eventTypeMetadata?.metadata);
+    const metadata = eventTypeMetaDataSchemaWithTypedApps.parse(eventTypeMetadata?.metadata);
 
     const stripeAppMetadata = metadata?.apps?.stripe;
 

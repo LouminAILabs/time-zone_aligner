@@ -1,16 +1,18 @@
-import EventManager from "@calcom/core/EventManager";
 import dayjs from "@calcom/dayjs";
 import { sendAddGuestsEmails } from "@calcom/emails";
-import { parseRecurringEvent } from "@calcom/lib";
-import { getTranslation } from "@calcom/lib/server";
-import { getUsersCredentials } from "@calcom/lib/server/getUsersCredentials";
-import { isTeamAdmin, isTeamOwner } from "@calcom/lib/server/queries/teams";
+import EventManager from "@calcom/features/bookings/lib/EventManager";
+import { PermissionCheckService } from "@calcom/features/pbac/services/permission-check.service";
+import { parseRecurringEvent } from "@calcom/lib/isRecurringEvent";
+import { getUsersCredentialsIncludeServiceAccountKey } from "@calcom/lib/server/getUsersCredentials";
+import { getTranslation } from "@calcom/lib/server/i18n";
 import { prisma } from "@calcom/prisma";
+import { MembershipRole } from "@calcom/prisma/enums";
+import type { BookingResponses } from "@calcom/prisma/zod-utils";
 import type { CalendarEvent } from "@calcom/types/Calendar";
 
 import { TRPCError } from "@trpc/server";
 
-import type { TrpcSessionUser } from "../../../trpc";
+import type { TrpcSessionUser } from "../../../types";
 import type { TAddGuestsInputSchema } from "./addGuests.schema";
 
 type AddGuestsOptions = {
@@ -23,7 +25,7 @@ export const addGuestsHandler = async ({ ctx, input }: AddGuestsOptions) => {
   const { user } = ctx;
   const { bookingId, guests } = input;
 
-  const booking = await prisma.booking.findFirst({
+  const booking = await prisma.booking.findUnique({
     where: {
       id: bookingId,
     },
@@ -43,19 +45,25 @@ export const addGuestsHandler = async ({ ctx, input }: AddGuestsOptions) => {
 
   if (!booking) throw new TRPCError({ code: "NOT_FOUND", message: "booking_not_found" });
 
-  const isTeamAdminOrOwner =
-    (await isTeamAdmin(user.id, booking.eventType?.teamId ?? 0)) ||
-    (await isTeamOwner(user.id, booking.eventType?.teamId ?? 0));
-
   const isOrganizer = booking.userId === user.id;
-
   const isAttendee = !!booking.attendees.find((attendee) => attendee.email === user.email);
 
-  if (!isTeamAdminOrOwner && !isOrganizer && !isAttendee) {
+  let hasBookingUpdatePermission = false;
+  if (booking.eventType?.teamId) {
+    const permissionCheckService = new PermissionCheckService();
+    hasBookingUpdatePermission = await permissionCheckService.checkPermission({
+      userId: user.id,
+      teamId: booking.eventType.teamId,
+      permission: "booking.update",
+      fallbackRoles: [MembershipRole.OWNER, MembershipRole.ADMIN],
+    });
+  }
+
+  if (!hasBookingUpdatePermission && !isOrganizer && !isAttendee) {
     throw new TRPCError({ code: "FORBIDDEN", message: "you_do_not_have_permission" });
   }
 
-  const organizer = await prisma.user.findFirstOrThrow({
+  const organizer = await prisma.user.findUniqueOrThrow({
     where: {
       id: booking.userId || 0,
     },
@@ -89,6 +97,8 @@ export const addGuestsHandler = async ({ ctx, input }: AddGuestsOptions) => {
     };
   });
 
+  const bookingResponses = booking.responses as BookingResponses;
+
   const bookingAttendees = await prisma.booking.update({
     where: {
       id: bookingId,
@@ -101,6 +111,10 @@ export const addGuestsHandler = async ({ ctx, input }: AddGuestsOptions) => {
         createMany: {
           data: guestsFullDetails,
         },
+      },
+      responses: {
+        ...bookingResponses,
+        guests: [...(bookingResponses?.guests || []), ...uniqueGuests],
       },
     },
   });
@@ -133,8 +147,10 @@ export const addGuestsHandler = async ({ ctx, input }: AddGuestsOptions) => {
       timeZone: organizer.timeZone,
       language: { translate: tOrganizer, locale: organizer.locale ?? "en" },
     },
+    hideOrganizerEmail: booking.eventType?.hideOrganizerEmail,
     attendees: attendeesList,
     uid: booking.uid,
+    iCalUID: booking.iCalUID,
     recurringEvent: parseRecurringEvent(booking.eventType?.recurringEvent),
     location: booking.location,
     destinationCalendar: booking?.destinationCalendar
@@ -144,6 +160,7 @@ export const addGuestsHandler = async ({ ctx, input }: AddGuestsOptions) => {
       : [],
     seatsPerTimeSlot: booking.eventType?.seatsPerTimeSlot,
     seatsShowAttendees: booking.eventType?.seatsShowAttendees,
+    customReplyToEmail: booking.eventType?.customReplyToEmail,
   };
 
   if (videoCallReference) {
@@ -155,7 +172,7 @@ export const addGuestsHandler = async ({ ctx, input }: AddGuestsOptions) => {
     };
   }
 
-  const credentials = await getUsersCredentials(ctx.user);
+  const credentials = await getUsersCredentialsIncludeServiceAccountKey(ctx.user);
 
   const eventManager = new EventManager({
     ...user,

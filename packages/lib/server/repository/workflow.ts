@@ -1,14 +1,15 @@
 import { z } from "zod";
 
 import type { WorkflowType } from "@calcom/ee/workflows/components/WorkflowListPage";
+import { deleteScheduledAIPhoneCall } from "@calcom/ee/workflows/lib/reminders/aiPhoneCallManager";
 import { deleteScheduledEmailReminder } from "@calcom/ee/workflows/lib/reminders/emailReminderManager";
 import { deleteScheduledSMSReminder } from "@calcom/ee/workflows/lib/reminders/smsReminderManager";
-import { deleteScheduledWhatsappReminder } from "@calcom/ee/workflows/lib/reminders/whatsappReminderManager";
 import type { WorkflowStep } from "@calcom/ee/workflows/lib/types";
 import { hasFilter } from "@calcom/features/filters/lib/hasFilter";
+import { HttpError } from "@calcom/lib/http-error";
 import prisma from "@calcom/prisma";
-import { MembershipRole } from "@calcom/prisma/client";
-import { Prisma } from "@calcom/prisma/client";
+import type { Prisma } from "@calcom/prisma/client";
+import { MembershipRole } from "@calcom/prisma/enums";
 import { WorkflowMethods } from "@calcom/prisma/enums";
 import type { TFilteredListInputSchema } from "@calcom/trpc/server/routers/viewer/workflows/filteredList.schema";
 import type { TGetVerifiedEmailsInputSchema } from "@calcom/trpc/server/routers/viewer/workflows/getVerifiedEmails.schema";
@@ -22,53 +23,53 @@ export const ZGetInputSchema = z.object({
 
 export type TGetInputSchema = z.infer<typeof ZGetInputSchema>;
 
-const { include: includedFields } = Prisma.validator<Prisma.WorkflowDefaultArgs>()({
-  include: {
-    activeOn: {
-      select: {
-        eventType: {
-          select: {
-            id: true,
-            title: true,
-            parentId: true,
-            _count: {
-              select: {
-                children: true,
-              },
+const deleteScheduledWhatsappReminder = deleteScheduledSMSReminder;
+
+const includedFields = {
+  activeOn: {
+    select: {
+      eventType: {
+        select: {
+          id: true,
+          title: true,
+          parentId: true,
+          _count: {
+            select: {
+              children: true,
             },
           },
         },
       },
     },
-    activeOnTeams: {
-      select: {
-        team: {
-          select: {
-            id: true,
-            name: true,
-          },
+  },
+  activeOnTeams: {
+    select: {
+      team: {
+        select: {
+          id: true,
+          name: true,
         },
       },
     },
-    steps: true,
-    team: {
-      select: {
-        id: true,
-        slug: true,
-        name: true,
-        members: true,
-        logoUrl: true,
-        isOrganization: true,
-      },
+  },
+  steps: true,
+  team: {
+    select: {
+      id: true,
+      slug: true,
+      name: true,
+      members: true,
+      logoUrl: true,
+      isOrganization: true,
     },
   },
-});
+} satisfies Prisma.WorkflowInclude;
 
 export class WorkflowRepository {
   private static log = logger.getSubLogger({ prefix: ["workflow"] });
 
   static async getById({ id }: TGetInputSchema) {
-    return await prisma.workflow.findFirst({
+    return await prisma.workflow.findUnique({
       where: {
         id,
       },
@@ -139,36 +140,58 @@ export class WorkflowRepository {
 
     let verifiedEmails: string[] = [userEmail];
 
+    const secondaryEmails = await prisma.secondaryEmail.findMany({
+      where: {
+        userId,
+        emailVerified: {
+          not: null,
+        },
+      },
+    });
+    verifiedEmails = verifiedEmails.concat(secondaryEmails.map((secondaryEmail) => secondaryEmail.email));
     if (teamId) {
-      const team = await prisma.team.findFirst({
+      const teamMembers = await prisma.user.findMany({
         where: {
-          id: teamId,
+          teams: {
+            some: {
+              teamId,
+            },
+          },
         },
         select: {
-          members: {
-            include: {
-              user: {
-                select: {
-                  id: true,
-                  email: true,
-                },
+          id: true,
+          email: true,
+          secondaryEmails: {
+            where: {
+              emailVerified: {
+                not: null,
               },
+            },
+            select: {
+              email: true,
             },
           },
         },
       });
-
-      if (!team) {
+      if (!teamMembers.length) {
         throw new Error("Team not found");
       }
 
-      const isTeamMember = team.members.some((member) => member.userId === userId);
+      const isTeamMember = teamMembers.some((member) => member.id === userId);
 
       if (!isTeamMember) {
         throw new Error("You are not a member of this team");
       }
 
-      verifiedEmails = verifiedEmails.concat(team.members.map((member) => member.user.email));
+      teamMembers.forEach((member) => {
+        if (member.id === userId) {
+          return;
+        }
+        verifiedEmails.push(member.email);
+        member.secondaryEmails.forEach((secondaryEmail) => {
+          verifiedEmails.push(secondaryEmail.email);
+        });
+      });
     }
 
     const emails = (
@@ -213,7 +236,7 @@ export class WorkflowRepository {
           position: "desc",
         },
         {
-          id: "asc",
+          id: "desc",
         },
       ],
     });
@@ -267,7 +290,7 @@ export class WorkflowRepository {
         where,
         include: includedFields,
         orderBy: {
-          id: "asc",
+          id: "desc",
         },
       });
 
@@ -361,6 +384,40 @@ export class WorkflowRepository {
     return remindersToDelete;
   }
 
+  static async getActiveOnEventTypeIds({
+    workflowId,
+    userId,
+    teamId,
+  }: {
+    workflowId: number;
+    userId: number;
+    teamId?: number | null;
+  }) {
+    const workflow = await prisma.workflow.findFirst({
+      where: {
+        id: workflowId,
+        userId,
+        teamId: teamId ?? undefined,
+      },
+      select: {
+        activeOn: {
+          select: {
+            eventTypeId: true,
+          },
+        },
+      },
+    });
+
+    if (!workflow) {
+      throw new HttpError({
+        statusCode: 404,
+        message: "Workflow not found",
+      });
+    }
+
+    return workflow.activeOn.map((active) => active.eventTypeId);
+  }
+
   static async deleteAllWorkflowReminders(
     remindersToDelete:
       | {
@@ -373,9 +430,10 @@ export class WorkflowRepository {
     const reminderMethods: {
       [x: string]: (id: number, referenceId: string | null) => void;
     } = {
-      [WorkflowMethods.EMAIL]: (id, referenceId) => deleteScheduledEmailReminder(id, referenceId),
+      [WorkflowMethods.EMAIL]: (id, referenceId) => deleteScheduledEmailReminder(id),
       [WorkflowMethods.SMS]: (id, referenceId) => deleteScheduledSMSReminder(id, referenceId),
       [WorkflowMethods.WHATSAPP]: (id, referenceId) => deleteScheduledWhatsappReminder(id, referenceId),
+      [WorkflowMethods.AI_PHONE_CALL]: (id, referenceId) => deleteScheduledAIPhoneCall(id, referenceId),
     };
 
     if (!remindersToDelete) return Promise.resolve();

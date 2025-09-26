@@ -1,31 +1,44 @@
-import type { Workflow } from "@prisma/client";
 import type { z } from "zod";
 
 import { isSMSOrWhatsappAction } from "@calcom/ee/workflows/lib/actionHelperFunctions";
 import { getAllWorkflows } from "@calcom/ee/workflows/lib/getAllWorkflows";
+import { scheduleAIPhoneCall } from "@calcom/ee/workflows/lib/reminders/aiPhoneCallManager";
 import { scheduleEmailReminder } from "@calcom/ee/workflows/lib/reminders/emailReminderManager";
 import { scheduleSMSReminder } from "@calcom/ee/workflows/lib/reminders/smsReminderManager";
+import emailRatingTemplate from "@calcom/ee/workflows/lib/reminders/templates/emailRatingTemplate";
+import emailReminderTemplate from "@calcom/ee/workflows/lib/reminders/templates/emailReminderTemplate";
 import { scheduleWhatsappReminder } from "@calcom/ee/workflows/lib/reminders/whatsappReminderManager";
 import type { Workflow as WorkflowType } from "@calcom/ee/workflows/lib/types";
-import { SMS_REMINDER_NUMBER_FIELD } from "@calcom/features/bookings/lib/SystemField";
+import {
+  SMS_REMINDER_NUMBER_FIELD,
+  CAL_AI_AGENT_PHONE_NUMBER_FIELD,
+} from "@calcom/features/bookings/lib/SystemField";
 import {
   getSmsReminderNumberField,
   getSmsReminderNumberSource,
+  getAIAgentCallPhoneNumberField,
+  getAIAgentCallPhoneNumberSource,
 } from "@calcom/features/bookings/lib/getBookingFields";
 import { removeBookingField, upsertBookingField } from "@calcom/features/eventtypes/lib/bookingFieldsManager";
+import type { PermissionString } from "@calcom/features/pbac/domain/types/permission-registry";
+import { PermissionCheckService } from "@calcom/features/pbac/services/permission-check.service";
 import { SENDER_ID, SENDER_NAME } from "@calcom/lib/constants";
 import { getBookerBaseUrl } from "@calcom/lib/getBookerUrl/server";
 import getOrgIdFromMemberOrTeamId from "@calcom/lib/getOrgIdFromMemberOrTeamId";
 import { getTeamIdFromEventType } from "@calcom/lib/getTeamIdFromEventType";
 import logger from "@calcom/lib/logger";
+import { getTranslation } from "@calcom/lib/server/i18n";
 import { WorkflowRepository } from "@calcom/lib/server/repository/workflow";
 import { getTimeFormatStringFromUserTimeFormat } from "@calcom/lib/timeFormat";
 import prisma from "@calcom/prisma";
+import type { Workflow } from "@calcom/prisma/client";
 import type { Prisma, WorkflowStep } from "@calcom/prisma/client";
 import type { TimeUnit } from "@calcom/prisma/enums";
+import { WorkflowTemplates } from "@calcom/prisma/enums";
 import { SchedulingType } from "@calcom/prisma/enums";
 import { BookingStatus, MembershipRole, WorkflowActions, WorkflowTriggerEvents } from "@calcom/prisma/enums";
 import { EventTypeMetaDataSchema } from "@calcom/prisma/zod-utils";
+import type { CalEventResponses } from "@calcom/types/Calendar";
 
 import { TRPCError } from "@trpc/server";
 
@@ -40,6 +53,8 @@ export const bookingSelect = {
   title: true,
   uid: true,
   metadata: true,
+  smsReminderNumber: true,
+  responses: true,
   attendees: {
     select: {
       name: true,
@@ -53,6 +68,8 @@ export const bookingSelect = {
       slug: true,
       id: true,
       schedulingType: true,
+      hideOrganizerEmail: true,
+      customReplyToEmail: true,
       hosts: {
         select: {
           user: {
@@ -130,8 +147,30 @@ export const verifyEmailSender = async (email: string, userId: number, teamId: n
     return;
   }
 
+  // Check if it's a verified secondary email of the user
+  const secondaryEmail = await prisma.secondaryEmail.findFirst({
+    where: {
+      userId,
+      email,
+      emailVerified: {
+        not: null,
+      },
+    },
+  });
+
+  if (secondaryEmail) {
+    await prisma.verifiedEmail.create({
+      data: {
+        email,
+        userId,
+        teamId,
+      },
+    });
+    return;
+  }
+
   if (teamId) {
-    const team = await prisma.team.findFirst({
+    const team = await prisma.team.findUnique({
       where: {
         id: teamId,
       },
@@ -142,6 +181,12 @@ export const verifyEmailSender = async (email: string, userId: number, teamId: n
               select: {
                 id: true,
                 email: true,
+                secondaryEmails: {
+                  select: {
+                    email: true,
+                    emailVerified: true,
+                  },
+                },
               },
             },
           },
@@ -159,9 +204,18 @@ export const verifyEmailSender = async (email: string, userId: number, teamId: n
       throw new TRPCError({ code: "FORBIDDEN", message: "You are not a member of this team" });
     }
 
-    const teamMemberEmail = team.members.filter((member) => member.user.email === email);
+    let foundTeamMember = team.members.find((member) => member.user.email === email);
 
-    if (teamMemberEmail) {
+    // Only check secondary emails if no match was found with primary email
+    if (!foundTeamMember) {
+      foundTeamMember = team.members.find((member) =>
+        member.user.secondaryEmails.some(
+          (secondary) => secondary.email === email && !!secondary.emailVerified
+        )
+      );
+    }
+
+    if (foundTeamMember) {
       await prisma.verifiedEmail.create({
         data: {
           email,
@@ -185,60 +239,32 @@ export function getSender(
 export async function isAuthorized(
   workflow: Pick<Workflow, "id" | "teamId" | "userId"> | null,
   currentUserId: number,
-  isWriteOperation?: boolean
+  permission: PermissionString = "workflow.read"
 ) {
   if (!workflow) {
     return false;
   }
-  if (!isWriteOperation) {
-    const userWorkflow = await prisma.workflow.findFirst({
-      where: {
-        id: workflow.id,
-        OR: [
-          { userId: currentUserId },
-          {
-            // for read operation every team member has access
-            team: {
-              members: {
-                some: {
-                  userId: currentUserId,
-                  accepted: true,
-                },
-              },
-            },
-          },
-        ],
-      },
-    });
-    if (userWorkflow) return true;
+
+  // For personal workflows (no teamId), check if user owns the workflow
+  if (!workflow.teamId) {
+    return workflow.userId === currentUserId;
   }
 
-  const userWorkflow = await prisma.workflow.findFirst({
-    where: {
-      id: workflow.id,
-      OR: [
-        { userId: currentUserId },
-        {
-          team: {
-            members: {
-              some: {
-                userId: currentUserId,
-                accepted: true,
-                //only admins can update team/org workflows
-                NOT: {
-                  role: MembershipRole.MEMBER,
-                },
-              },
-            },
-          },
-        },
-      ],
-    },
+  // For team workflows, use PBAC
+  const permissionService = new PermissionCheckService();
+
+  // Determine fallback roles based on permission type
+  const fallbackRoles =
+    permission === "workflow.read"
+      ? [MembershipRole.ADMIN, MembershipRole.OWNER, MembershipRole.MEMBER]
+      : [MembershipRole.ADMIN, MembershipRole.OWNER];
+
+  return await permissionService.checkPermission({
+    userId: currentUserId,
+    teamId: workflow.teamId,
+    permission,
+    fallbackRoles,
   });
-
-  if (userWorkflow) return true;
-
-  return false;
 }
 
 export async function upsertSmsReminderFieldForEventTypes({
@@ -313,6 +339,78 @@ export async function removeSmsReminderFieldForEventType({
   );
 }
 
+export async function upsertAIAgentCallPhoneNumberFieldForEventTypes({
+  activeOn,
+  workflowId,
+  isAIAgentCallPhoneNumberRequired,
+  isOrg,
+}: {
+  activeOn: number[];
+  workflowId: number;
+  isAIAgentCallPhoneNumberRequired?: boolean;
+  isOrg: boolean;
+}) {
+  let allEventTypeIds = activeOn;
+
+  if (isOrg) {
+    allEventTypeIds = await getAllUserAndTeamEventTypes(activeOn);
+  }
+
+  for (const eventTypeId of allEventTypeIds) {
+    await upsertBookingField(
+      getAIAgentCallPhoneNumberField(),
+      getAIAgentCallPhoneNumberSource({
+        workflowId,
+        isAIAgentCallPhoneNumberRequired: isAIAgentCallPhoneNumberRequired ?? false,
+      }),
+      eventTypeId
+    );
+  }
+}
+
+export async function removeAIAgentCallPhoneNumberFieldForEventTypes({
+  activeOnToRemove,
+  workflowId,
+  isOrg,
+  activeOn,
+}: {
+  activeOnToRemove: number[];
+  workflowId: number;
+  isOrg: boolean;
+  activeOn?: number[];
+}) {
+  let allEventTypeIds = activeOnToRemove;
+
+  if (isOrg) {
+    allEventTypeIds = await getAllUserAndTeamEventTypes(activeOnToRemove, activeOn);
+  }
+  for (const eventTypeId of allEventTypeIds) {
+    await removeAIAgentCallPhoneNumberFieldForEventType({
+      workflowId,
+      eventTypeId,
+    });
+  }
+}
+
+export async function removeAIAgentCallPhoneNumberFieldForEventType({
+  workflowId,
+  eventTypeId,
+}: {
+  workflowId: number;
+  eventTypeId: number;
+}) {
+  await removeBookingField(
+    {
+      name: CAL_AI_AGENT_PHONE_NUMBER_FIELD,
+    },
+    {
+      id: `${workflowId}`,
+      type: "workflow",
+    },
+    eventTypeId
+  );
+}
+
 async function getAllUserAndTeamEventTypes(teamIds: number[], notMemberOfTeamId: number[] = []) {
   const teamMembersWithEventTypes = await prisma.membership.findMany({
     where: {
@@ -366,7 +464,7 @@ export async function isAuthorizedToAddActiveOnIds(
 ) {
   for (const id of newActiveIds) {
     if (isOrg) {
-      const newTeam = await prisma.team.findFirst({
+      const newTeam = await prisma.team.findUnique({
         where: {
           id,
         },
@@ -378,7 +476,7 @@ export async function isAuthorizedToAddActiveOnIds(
         return false;
       }
     } else {
-      const newEventType = await prisma.eventType.findFirst({
+      const newEventType = await prisma.eventType.findUnique({
         where: {
           id,
         },
@@ -461,17 +559,27 @@ async function getRemindersFromRemovedEventTypes(removedEventTypes: number[], wo
   return remindersToDelete;
 }
 
-export async function scheduleWorkflowNotifications(
-  activeOn: number[],
-  isOrg: boolean,
-  workflowSteps: Partial<WorkflowStep>[],
-  time: number | null,
-  timeUnit: TimeUnit | null,
-  trigger: WorkflowTriggerEvents,
-  userId: number,
-  teamId: number | null,
-  alreadyScheduledActiveOnIds?: number[]
-) {
+export async function scheduleWorkflowNotifications({
+  activeOn,
+  isOrg,
+  workflowSteps,
+  time,
+  timeUnit,
+  trigger,
+  userId,
+  teamId,
+  alreadyScheduledActiveOnIds,
+}: {
+  activeOn: number[];
+  isOrg: boolean;
+  workflowSteps: Partial<WorkflowStep>[];
+  time: number | null;
+  timeUnit: TimeUnit | null;
+  trigger: WorkflowTriggerEvents;
+  userId: number;
+  teamId: number | null;
+  alreadyScheduledActiveOnIds?: number[];
+}) {
   const bookingsToScheduleNotifications = await getBookings(activeOn, isOrg, alreadyScheduledActiveOnIds);
 
   await scheduleBookingReminders(
@@ -549,6 +657,9 @@ async function getBookings(activeOn: number[], isOrg: boolean, alreadyScheduledA
         },
       },
       select: bookingSelect,
+      orderBy: {
+        startTime: "asc",
+      },
     });
     return bookingsForReminders;
   } else {
@@ -570,6 +681,9 @@ async function getBookings(activeOn: number[], isOrg: boolean, alreadyScheduledA
         },
       },
       select: bookingSelect,
+      orderBy: {
+        startTime: "asc",
+      },
     });
     return bookingsForReminders;
   }
@@ -598,15 +712,12 @@ export async function scheduleBookingReminders(
 
   //create reminders for all bookings for each workflow step
   const promiseSteps = workflowSteps.map(async (step) => {
-    // we do not have attendees phone number (user is notified about that when setting this action)
-    if (step.action == WorkflowActions.SMS_ATTENDEE || step.action == WorkflowActions.WHATSAPP_ATTENDEE)
-      return;
-
     const promiseScheduleReminders = bookings.map(async (booking) => {
       const defaultLocale = "en";
       const bookingInfo = {
         uid: booking.uid,
         bookerUrl,
+        type: booking.eventType?.slug || "event",
         attendees: booking.attendees.map((attendee) => {
           return {
             name: attendee.name,
@@ -628,12 +739,15 @@ export async function scheduleBookingReminders(
         endTime: booking.endTime?.toISOString(),
         title: booking.title,
         language: { locale: booking?.user?.locale || defaultLocale },
+        hideOrganizerEmail: booking.eventType?.hideOrganizerEmail,
         eventType: {
           slug: booking.eventType?.slug || "",
           schedulingType: booking.eventType?.schedulingType,
           hosts: booking.eventType?.hosts,
         },
         metadata: booking.metadata,
+        customReplyToEmail: booking.eventType?.customReplyToEmail,
+        responses: booking.responses as CalEventResponses | null,
       };
       if (
         step.action === WorkflowActions.EMAIL_HOST ||
@@ -679,6 +793,7 @@ export async function scheduleBookingReminders(
           template: step.template,
           sender: step.sender,
           workflowStepId: step.id,
+          verifiedAt: step?.verifiedAt ?? null,
         });
       } else if (step.action === WorkflowActions.SMS_NUMBER && step.sendTo) {
         await scheduleSMSReminder({
@@ -696,6 +811,7 @@ export async function scheduleBookingReminders(
           sender: step.sender,
           userId: userId,
           teamId: teamId,
+          verifiedAt: step?.verifiedAt ?? null,
         });
       } else if (step.action === WorkflowActions.WHATSAPP_NUMBER && step.sendTo) {
         await scheduleWhatsappReminder({
@@ -712,6 +828,58 @@ export async function scheduleBookingReminders(
           template: step.template,
           userId: userId,
           teamId: teamId,
+          verifiedAt: step?.verifiedAt ?? null,
+        });
+      } else if (booking.smsReminderNumber) {
+        if (step.action === WorkflowActions.SMS_ATTENDEE) {
+          await scheduleSMSReminder({
+            evt: bookingInfo,
+            reminderPhone: booking.smsReminderNumber,
+            triggerEvent: trigger,
+            action: step.action,
+            timeSpan: {
+              time,
+              timeUnit,
+            },
+            message: step.reminderBody || "",
+            workflowStepId: step.id,
+            template: step.template,
+            sender: step.sender,
+            userId: userId,
+            teamId: teamId,
+            verifiedAt: step?.verifiedAt ?? null,
+          });
+        } else if (step.action === WorkflowActions.WHATSAPP_ATTENDEE) {
+          await scheduleWhatsappReminder({
+            evt: bookingInfo,
+            reminderPhone: booking.smsReminderNumber,
+            triggerEvent: trigger,
+            action: step.action,
+            timeSpan: {
+              time,
+              timeUnit,
+            },
+            message: step.reminderBody || "",
+            workflowStepId: step.id,
+            template: step.template,
+            sender: step.sender,
+            userId: userId,
+            teamId: teamId,
+            verifiedAt: step?.verifiedAt ?? null,
+          });
+        }
+      } else if (step.action === WorkflowActions.CAL_AI_PHONE_CALL) {
+        await scheduleAIPhoneCall({
+          evt: bookingInfo,
+          triggerEvent: trigger,
+          timeSpan: {
+            time,
+            timeUnit,
+          },
+          workflowStepId: step.id,
+          userId,
+          teamId,
+          verifiedAt: step?.verifiedAt ?? null,
         });
       }
     });
@@ -848,3 +1016,35 @@ export const getEventTypeWorkflows = async (
 
   return workflows.map((workflow) => ({ workflow }));
 };
+
+export async function getEmailTemplateText(
+  template: WorkflowTemplates,
+  params: { locale: string; action: WorkflowActions; timeFormat: number | null }
+) {
+  const { locale, action } = params;
+
+  const timeFormat = getTimeFormatStringFromUserTimeFormat(params.timeFormat);
+
+  let { emailBody, emailSubject } = emailReminderTemplate({
+    isEditingMode: true,
+    locale,
+    t: await getTranslation(locale ?? "en", "common"),
+    action,
+    timeFormat,
+  });
+
+  if (template === WorkflowTemplates.RATING) {
+    const ratingTemplate = emailRatingTemplate({
+      isEditingMode: true,
+      locale,
+      action,
+      t: await getTranslation(locale ?? "en", "common"),
+      timeFormat,
+    });
+
+    emailBody = ratingTemplate.emailBody;
+    emailSubject = ratingTemplate.emailSubject;
+  }
+
+  return { emailBody, emailSubject };
+}

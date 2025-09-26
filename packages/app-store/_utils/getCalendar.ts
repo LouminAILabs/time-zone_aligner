@@ -1,8 +1,8 @@
 import logger from "@calcom/lib/logger";
 import type { Calendar, CalendarClass } from "@calcom/types/Calendar";
-import type { CredentialPayload } from "@calcom/types/Credential";
+import type { CredentialForCalendarService } from "@calcom/types/Credential";
 
-import appStore from "..";
+import { CalendarServiceMap } from "../calendar.services.generated";
 
 interface CalendarApp {
   lib: {
@@ -23,7 +23,9 @@ const isCalendarService = (x: unknown): x is CalendarApp =>
   !!x.lib &&
   "CalendarService" in x.lib;
 
-export const getCalendar = async (credential: CredentialPayload | null): Promise<Calendar | null> => {
+export const getCalendar = async (
+  credential: CredentialForCalendarService | null
+): Promise<Calendar | null> => {
   if (!credential || !credential.key) return null;
   let { type: calendarType } = credential;
   if (calendarType?.endsWith("_other_calendar")) {
@@ -34,20 +36,22 @@ export const getCalendar = async (credential: CredentialPayload | null): Promise
     calendarType = calendarType.split("_crm")[0];
   }
 
-  const calendarAppImportFn = appStore[calendarType.split("_").join("") as keyof typeof appStore];
+  const calendarAppImportFn =
+    CalendarServiceMap[calendarType.split("_").join("") as keyof typeof CalendarServiceMap];
 
   if (!calendarAppImportFn) {
     log.warn(`calendar of type ${calendarType} is not implemented`);
     return null;
   }
 
-  const calendarApp = await calendarAppImportFn();
+  const calendarApp = await calendarAppImportFn;
 
-  if (!isCalendarService(calendarApp)) {
+  const CalendarService = calendarApp.default;
+
+  if (!CalendarService || typeof CalendarService !== "function") {
     log.warn(`calendar of type ${calendarType} is not implemented`);
     return null;
   }
-  log.info("Got calendarApp", calendarApp.lib.CalendarService);
-  const CalendarService = calendarApp.lib.CalendarService;
-  return new CalendarService(credential);
+
+  return new CalendarService(credential as any);
 };

@@ -3,131 +3,221 @@
 import type { DailyCall } from "@daily-co/daily-js";
 import DailyIframe from "@daily-co/daily-js";
 import { DailyProvider } from "@daily-co/daily-react";
-import Head from "next/head";
-import { useState, useEffect, useRef } from "react";
+import { useDailyEvent } from "@daily-co/daily-react";
+import { useState, useEffect, useRef, useCallback } from "react";
 
 import dayjs from "@calcom/dayjs";
-import classNames from "@calcom/lib/classNames";
-import { APP_NAME, SEO_IMG_OGIMG_VIDEO, WEBSITE_URL } from "@calcom/lib/constants";
+import { WEBSITE_URL } from "@calcom/lib/constants";
+import { WEBAPP_URL } from "@calcom/lib/constants";
 import { TRANSCRIPTION_STOPPED_ICON, RECORDING_DEFAULT_ICON } from "@calcom/lib/constants";
-import { formatToLocalizedDate, formatToLocalizedTime } from "@calcom/lib/date-fns";
+import { formatToLocalizedDate, formatToLocalizedTime } from "@calcom/lib/dayjs";
 import { useLocale } from "@calcom/lib/hooks/useLocale";
 import { markdownToSafeHTML } from "@calcom/lib/markdownToSafeHTML";
 import type { inferSSRProps } from "@calcom/types/inferSSRProps";
-import { Icon } from "@calcom/ui";
+import classNames from "@calcom/ui/classNames";
+import { Button } from "@calcom/ui/components/button";
+import { Dialog, DialogContent } from "@calcom/ui/components/dialog";
+import { Input } from "@calcom/ui/components/form";
+import { Icon } from "@calcom/ui/components/icon";
 
 import type { getServerSideProps } from "@lib/video/[uid]/getServerSideProps";
 
-import { CalAiTranscribe } from "~/videos/ai/ai-transcribe";
+import { CalVideoPremiumFeatures } from "../cal-video-premium-features";
 
 export type PageProps = inferSSRProps<typeof getServerSideProps>;
 
 export default function JoinCall(props: PageProps) {
   const { t } = useLocale();
-  const { meetingUrl, meetingPassword, booking, hasTeamPlan, calVideoLogo } = props;
+  const {
+    meetingUrl,
+    meetingPassword,
+    booking,
+    hasTeamPlan,
+    calVideoLogo,
+    displayLogInOverlay,
+    loggedInUserName,
+    overrideName,
+    showRecordingButton,
+    enableAutomaticTranscription,
+    enableAutomaticRecordingForOrganizer,
+    showTranscriptionButton,
+    rediectAttendeeToOnExit,
+  } = props;
   const [daily, setDaily] = useState<DailyCall | null>(null);
+  const [userNameForCall, setUserNameForCall] = useState<string | undefined>(
+    overrideName ?? loggedInUserName ?? undefined
+  );
+  const [isUserNameConfirmed, setIsUserNameConfirmed] = useState<boolean>(!displayLogInOverlay);
+  const [isCallFrameReady, setIsCallFrameReady] = useState<boolean>(false);
+
+  const createCallFrame = useCallback(
+    (userName?: string) => {
+      let callFrame: DailyCall | undefined;
+
+      try {
+        callFrame = DailyIframe.createFrame({
+          theme: {
+            colors: {
+              accent: "#FFF",
+              accentText: "#111111",
+              background: "#111111",
+              backgroundAccent: "#111111",
+              baseText: "#FFF",
+              border: "#292929",
+              mainAreaBg: "#111111",
+              mainAreaBgAccent: "#1A1A1A",
+              mainAreaText: "#FFF",
+              supportiveText: "#FFF",
+            },
+          },
+          showLeaveButton: true,
+          iframeStyle: {
+            position: "fixed",
+            width: "100%",
+            height: "100%",
+          },
+          url: meetingUrl,
+          userName: userName,
+          ...(typeof meetingPassword === "string" && { token: meetingPassword }),
+          ...(hasTeamPlan && {
+            customTrayButtons: {
+              ...(showRecordingButton
+                ? {
+                    recording: {
+                      label: t("record"),
+                      tooltip: t("start_or_stop_recording"),
+                      iconPath: RECORDING_DEFAULT_ICON,
+                      iconPathDarkMode: RECORDING_DEFAULT_ICON,
+                    },
+                  }
+                : {}),
+              ...(showTranscriptionButton
+                ? {
+                    transcription: {
+                      label: t("transcribe"),
+                      tooltip: t("transcription_powered_by_ai"),
+                      iconPath: TRANSCRIPTION_STOPPED_ICON,
+                      iconPathDarkMode: TRANSCRIPTION_STOPPED_ICON,
+                    },
+                  }
+                : {}),
+            },
+          }),
+        });
+
+        if (userName) {
+          callFrame.setUserName(userName);
+        }
+
+        return callFrame;
+      } catch (err) {
+        return DailyIframe.getCallInstance();
+      }
+    },
+    [meetingUrl, meetingPassword, hasTeamPlan, showRecordingButton, showTranscriptionButton, t]
+  );
 
   useEffect(() => {
-    const callFrame = DailyIframe.createFrame({
-      theme: {
-        colors: {
-          accent: "#FFF",
-          accentText: "#111111",
-          background: "#111111",
-          backgroundAccent: "#111111",
-          baseText: "#FFF",
-          border: "#292929",
-          mainAreaBg: "#111111",
-          mainAreaBgAccent: "#1A1A1A",
-          mainAreaText: "#FFF",
-          supportiveText: "#FFF",
-        },
-      },
-      showLeaveButton: true,
-      iframeStyle: {
-        position: "fixed",
-        width: "100%",
-        height: "100%",
-      },
-      url: meetingUrl,
-      ...(typeof meetingPassword === "string" && { token: meetingPassword }),
-      ...(hasTeamPlan && {
-        customTrayButtons: {
-          recording: {
-            label: "Record",
-            tooltip: "Start or stop recording",
-            iconPath: RECORDING_DEFAULT_ICON,
-            iconPathDarkMode: RECORDING_DEFAULT_ICON,
-          },
-          transcription: {
-            label: "Cal.ai",
-            tooltip: "Transcription powered by AI",
-            iconPath: TRANSCRIPTION_STOPPED_ICON,
-            iconPathDarkMode: TRANSCRIPTION_STOPPED_ICON,
-          },
-        },
-      }),
-    });
+    if (displayLogInOverlay && !loggedInUserName && !overrideName && !isUserNameConfirmed) {
+      return;
+    }
 
-    setDaily(callFrame);
+    let callFrame: DailyCall | null = null;
 
-    callFrame.join();
+    try {
+      callFrame = createCallFrame(userNameForCall) ?? null;
+      setDaily(callFrame);
+      setIsCallFrameReady(true);
+
+      callFrame?.join();
+    } catch (error) {
+      console.error("Failed to create or join call:", error);
+    }
 
     return () => {
-      callFrame.destroy();
+      if (callFrame) {
+        try {
+          callFrame.destroy();
+        } catch (error) {
+          console.error("Error destroying call frame:", error);
+        }
+      }
+      setDaily(null);
+      setIsCallFrameReady(false);
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [
+    displayLogInOverlay,
+    isUserNameConfirmed,
+    userNameForCall,
+    createCallFrame,
+    loggedInUserName,
+    overrideName,
+  ]);
+
+  const handleJoinAsGuest = useCallback((guestName: string) => {
+    const trimmedName = guestName.trim();
+    if (!trimmedName) {
+      return;
+    }
+
+    setUserNameForCall(trimmedName);
+    setIsUserNameConfirmed(true);
   }, []);
 
-  const title = `${APP_NAME} Video`;
+  const handleUserNameConfirmed = useCallback(() => {
+    setIsUserNameConfirmed(true);
+  }, []);
+
   return (
-    <>
-      <Head>
-        <title>{title}</title>
-        <meta name="description" content={t("quick_video_meeting")} />
-        <meta property="og:image" content={SEO_IMG_OGIMG_VIDEO} />
-        <meta property="og:type" content="website" />
-        <meta property="og:url" content={`${WEBSITE_URL}/video`} />
-        <meta property="og:title" content={`${APP_NAME} Video`} />
-        <meta property="og:description" content={t("quick_video_meeting")} />
-        <meta property="twitter:image" content={SEO_IMG_OGIMG_VIDEO} />
-        <meta property="twitter:card" content="summary_large_image" />
-        <meta property="twitter:url" content={`${WEBSITE_URL}/video`} />
-        <meta property="twitter:title" content={`${APP_NAME} Video`} />
-        <meta property="twitter:description" content={t("quick_video_meeting")} />
-      </Head>
-      <DailyProvider callObject={daily}>
+    <DailyProvider callObject={daily}>
+      {isCallFrameReady && (
         <div
           className="mx-auto hidden sm:block"
           style={{ zIndex: 2, left: "30%", position: "absolute", bottom: 100, width: "auto" }}>
-          <CalAiTranscribe />
+          <CalVideoPremiumFeatures
+            showRecordingButton={showRecordingButton}
+            enableAutomaticRecordingForOrganizer={enableAutomaticRecordingForOrganizer}
+            enableAutomaticTranscription={enableAutomaticTranscription}
+            showTranscriptionButton={showTranscriptionButton}
+          />
         </div>
-        <div style={{ zIndex: 2, position: "relative" }}>
-          {calVideoLogo ? (
-            <img
-              className="min-w-16 min-h-16 fixed z-10 hidden aspect-square h-16 w-16 rounded-full sm:inline-block"
-              src={calVideoLogo}
-              alt="My Org Logo"
-              style={{
-                top: 32,
-                left: 32,
-              }}
-            />
-          ) : (
-            <img
-              className="fixed z-10 hidden h-5 sm:inline-block"
-              src={`${WEBSITE_URL}/cal-logo-word-dark.svg`}
-              alt="Logo"
-              style={{
-                top: 47,
-                left: 20,
-              }}
-            />
-          )}
-        </div>
-        <VideoMeetingInfo booking={booking} />
-      </DailyProvider>
-    </>
+      )}
+      <div style={{ zIndex: 2, position: "relative" }}>
+        {calVideoLogo ? (
+          <img
+            className="min-w-16 min-h-16 fixed z-10 hidden aspect-square h-16 w-16 rounded-full sm:inline-block"
+            src={calVideoLogo}
+            alt="My Org Logo"
+            style={{
+              top: 32,
+              left: 32,
+            }}
+          />
+        ) : (
+          <img
+            className="fixed z-10 hidden h-5 sm:inline-block"
+            src={`${WEBSITE_URL}/cal-logo-word-dark.svg`}
+            alt="Logo"
+            style={{
+              top: 47,
+              left: 20,
+            }}
+          />
+        )}
+      </div>
+      {displayLogInOverlay && !isUserNameConfirmed && (
+        <LogInOverlay
+          isLoggedIn={!!loggedInUserName}
+          bookingUid={booking.uid}
+          loggedInUserName={loggedInUserName ?? undefined}
+          overrideName={overrideName}
+          onJoinAsGuest={handleJoinAsGuest}
+          onUserNameConfirmed={handleUserNameConfirmed}
+        />
+      )}
+
+      <VideoMeetingInfo booking={booking} rediectAttendeeToOnExit={rediectAttendeeToOnExit} />
+    </DailyProvider>
   );
 }
 
@@ -183,8 +273,7 @@ function ProgressBar(props: ProgressBarProps) {
         intervalRef.current = null;
       }
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [startingTime]);
 
   const prev = startDuration - duration;
   const percentage = prev * (100 / startDuration);
@@ -201,17 +290,154 @@ function ProgressBar(props: ProgressBarProps) {
   );
 }
 
+interface LogInOverlayProps {
+  isLoggedIn: boolean;
+  bookingUid: string;
+  loggedInUserName?: string;
+  overrideName?: string;
+  onJoinAsGuest: (guestName: string) => void;
+  onUserNameConfirmed?: () => void;
+}
+
+export function LogInOverlay(props: LogInOverlayProps) {
+  const { t } = useLocale();
+  const { bookingUid, isLoggedIn, loggedInUserName, overrideName, onJoinAsGuest, onUserNameConfirmed } =
+    props;
+
+  const [isOpen, setIsOpen] = useState(!isLoggedIn);
+  const [userName, setUserName] = useState(overrideName ?? loggedInUserName ?? "");
+  const [isLoading, setIsLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const handleContinueAsGuest = useCallback(async () => {
+    const trimmedName = userName.trim();
+    if (!trimmedName) {
+      return;
+    }
+
+    setIsLoading(true);
+    setError(null);
+
+    try {
+      onJoinAsGuest(trimmedName);
+      onUserNameConfirmed?.();
+      setIsOpen(false);
+    } catch (error) {
+      console.error("Error joining as guest:", error);
+      const errorMessage = error instanceof Error ? error.message : t("failed_to_join_call");
+
+      setError(errorMessage);
+    } finally {
+      setIsLoading(false);
+    }
+  }, [userName, onJoinAsGuest, onUserNameConfirmed, t]);
+
+  const handleKeyDown = useCallback(
+    (e: React.KeyboardEvent<HTMLInputElement>) => {
+      if (e.key === "Enter" && userName.trim() && !isLoading) {
+        handleContinueAsGuest();
+      }
+    },
+    [userName, isLoading, handleContinueAsGuest]
+  );
+
+  const handleUserNameChange = useCallback(
+    (e: React.ChangeEvent<HTMLInputElement>) => {
+      setUserName(e.target.value);
+      if (error) {
+        setError(null);
+      }
+    },
+    [error]
+  );
+
+  return (
+    <Dialog open={isOpen} onOpenChange={setIsOpen}>
+      <DialogContent
+        title={t("join_video_call")}
+        description={t("choose_how_you_d_like_to_appear_on_the_call")}
+        className="bg-white text-black dark:bg-black dark:text-white sm:max-w-[480px]">
+        <div className="pb-4">
+          <div className="space-y-4">
+            <div>
+              <div className="font-semibold">{t("join_as_guest")}</div>
+              <p className="text-subtle text-sm">{t("ideal_for_one_time_calls")}</p>
+            </div>
+
+            <div className="flex gap-4">
+              <Input
+                type="text"
+                placeholder={t("your_name")}
+                className="w-full flex-1"
+                value={userName}
+                onChange={handleUserNameChange}
+                onKeyDown={handleKeyDown}
+                disabled={isLoading}
+                autoFocus
+              />
+              <Button color="secondary" onClick={handleContinueAsGuest} loading={isLoading}>
+                {t("continue")}
+              </Button>
+            </div>
+          </div>
+
+          {error && (
+            <div className="rounded-md bg-red-50 p-3 dark:bg-red-900/20">
+              <div className="flex">
+                <div className="ml-3">
+                  <p className="text-sm font-medium text-red-800 dark:text-red-200">{error}</p>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* Divider */}
+          <hr className="my-5 h-0.5 border-t-0 bg-neutral-100 dark:bg-white/10" />
+
+          <div className="mt-5 space-y-4">
+            <div>
+              <h4 className="text-base font-semibold text-black dark:text-white">
+                {t("sign_in_to_cal_com")}
+              </h4>
+              <p className="text-sm text-[#6B7280] dark:text-gray-300">
+                {t("track_meetings_and_manage_schedule")}
+              </p>
+            </div>
+
+            <Button
+              color="primary"
+              className="w-full justify-center"
+              onClick={() =>
+                (window.location.href = `${WEBAPP_URL}/auth/login?callbackUrl=${WEBAPP_URL}/video/${bookingUid}`)
+              }>
+              {t("sign_in")}
+            </Button>
+          </div>
+        </div>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
 interface VideoMeetingInfo {
   booking: PageProps["booking"];
+  rediectAttendeeToOnExit?: string | null;
 }
 
 export function VideoMeetingInfo(props: VideoMeetingInfo) {
   const [open, setOpen] = useState(false);
-  const { booking } = props;
+  const { booking, rediectAttendeeToOnExit } = props;
   const { t } = useLocale();
 
   const endTime = new Date(booking.endTime);
   const startTime = new Date(booking.startTime);
+  const timeZone = booking.user?.timeZone;
+
+  useDailyEvent("left-meeting", () => {
+    if (rediectAttendeeToOnExit) {
+      window.location.href = rediectAttendeeToOnExit;
+    }
+  });
 
   return (
     <>
@@ -224,11 +450,11 @@ export function VideoMeetingInfo(props: VideoMeetingInfo) {
           <h3>{t("what")}:</h3>
           <p>{booking.title}</p>
           <h3>{t("invitee_timezone")}:</h3>
-          <p>{booking.user?.timeZone}</p>
+          <p>{timeZone}</p>
           <h3>{t("when")}:</h3>
           <p suppressHydrationWarning={true}>
             {formatToLocalizedDate(startTime)} <br />
-            {formatToLocalizedTime(startTime)}
+            {formatToLocalizedTime({ date: startTime, timeZone })}
           </p>
           <h3>{t("time_left")}</h3>
           <ProgressBar
@@ -239,8 +465,12 @@ export function VideoMeetingInfo(props: VideoMeetingInfo) {
 
           <h3>{t("who")}:</h3>
           <p>
-            {booking?.user?.name} - {t("organizer")}:{" "}
-            <a href={`mailto:${booking?.user?.email}`}>{booking?.user?.email}</a>
+            {booking?.user?.name} - {t("organizer")}
+            {!booking?.eventType?.hideOrganizerEmail && (
+              <>
+                : <a href={`mailto:${booking?.user?.email}`}>{booking?.user?.email}</a>
+              </>
+            )}
           </p>
 
           {booking.attendees.length
@@ -257,6 +487,7 @@ export function VideoMeetingInfo(props: VideoMeetingInfo) {
 
               <div
                 className="prose-sm prose prose-invert"
+                // eslint-disable-next-line react/no-danger
                 dangerouslySetInnerHTML={{ __html: markdownToSafeHTML(booking.description) }}
               />
             </>

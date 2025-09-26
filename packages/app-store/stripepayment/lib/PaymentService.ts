@@ -1,4 +1,3 @@
-import type { Booking, Payment, PaymentOption, Prisma } from "@prisma/client";
 import Stripe from "stripe";
 import { v4 as uuidv4 } from "uuid";
 import z from "zod";
@@ -6,9 +5,12 @@ import z from "zod";
 import { sendAwaitingPaymentEmailAndSMS } from "@calcom/emails";
 import { ErrorCode } from "@calcom/lib/errorCodes";
 import { getErrorFromUnknown } from "@calcom/lib/errors";
+import { ErrorWithCode } from "@calcom/lib/errors";
 import logger from "@calcom/lib/logger";
 import { safeStringify } from "@calcom/lib/safeStringify";
+import { BookingRepository } from "@calcom/lib/server/repository/booking";
 import prisma from "@calcom/prisma";
+import type { Booking, Payment, PaymentOption, Prisma } from "@calcom/prisma/client";
 import type { EventTypeMetadata } from "@calcom/prisma/zod-utils";
 import type { CalendarEvent } from "@calcom/types/Calendar";
 import type { IAbstractPaymentService } from "@calcom/types/PaymentService";
@@ -24,12 +26,6 @@ export const stripeCredentialKeysSchema = z.object({
   stripe_user_id: z.string(),
   default_currency: z.string(),
   stripe_publishable_key: z.string(),
-});
-
-const stripeAppKeysSchema = z.object({
-  client_id: z.string(),
-  payment_fee_fixed: z.number(),
-  payment_fee_percentage: z.number(),
 });
 
 export class PaymentService implements IAbstractPaymentService {
@@ -87,19 +83,20 @@ export class PaymentService implements IAbstractPaymentService {
       const params: Stripe.PaymentIntentCreateParams = {
         amount: payment.amount,
         currency: payment.currency,
-        payment_method_types: ["card"],
         customer: customer.id,
-        metadata: {
-          identifier: "cal.com",
+        automatic_payment_methods: {
+          enabled: true,
+        },
+        metadata: this.generateMetadata({
           bookingId,
-          calAccountId: userId,
-          calUsername: username,
+          userId,
+          username,
           bookerName,
           bookerEmail: bookerEmail,
           bookerPhoneNumber: bookerPhoneNumber ?? null,
           eventTitle: eventTitle || "",
           bookingTitle: bookingTitle || "",
-        },
+        }),
       };
 
       const paymentIntent = await this.stripe.paymentIntents.create(params, {
@@ -220,29 +217,22 @@ export class PaymentService implements IAbstractPaymentService {
     }
   }
 
-  async chargeCard(payment: Payment, _bookingId?: Booking["id"]): Promise<Payment> {
+  async chargeCard(payment: Payment, bookingId: Booking["id"]): Promise<Payment> {
     try {
       if (!this.credentials) {
         throw new Error("Stripe credentials not found");
       }
 
-      const stripeAppKeys = await prisma.app.findFirst({
-        select: {
-          keys: true,
-        },
-        where: {
-          slug: "stripe",
-        },
-      });
+      const bookingRepository = new BookingRepository(prisma);
+      const booking = await bookingRepository.findByIdIncludeUserAndAttendees(bookingId);
+
+      if (!booking) {
+        throw new Error(`Booking ${bookingId} not found`);
+      }
 
       const paymentObject = payment.data as unknown as StripeSetupIntentData;
 
       const setupIntent = paymentObject.setupIntent;
-
-      // Parse keys with zod
-      const { payment_fee_fixed, payment_fee_percentage } = stripeAppKeysSchema.parse(stripeAppKeys?.keys);
-
-      const paymentFee = Math.round(payment.amount * payment_fee_percentage + payment_fee_fixed);
 
       // Ensure that the stripe customer & payment method still exists
       const customer = await this.stripe.customers.retrieve(setupIntent.customer as string, {
@@ -260,14 +250,27 @@ export class PaymentService implements IAbstractPaymentService {
         throw new Error(`Stripe paymentMethod does not exist for setupIntent ${setupIntent.id}`);
       }
 
-      const params = {
+      if (!booking.attendees[0]) {
+        throw new Error(`Booking attendees are empty for setupIntent ${setupIntent.id}`);
+      }
+
+      const params: Stripe.PaymentIntentCreateParams = {
         amount: payment.amount,
         currency: payment.currency,
-        application_fee_amount: paymentFee,
         customer: setupIntent.customer as string,
         payment_method: setupIntent.payment_method as string,
         off_session: true,
         confirm: true,
+        metadata: this.generateMetadata({
+          bookingId,
+          userId: booking.user?.id,
+          username: booking.user?.username,
+          bookerName: booking.attendees[0].name,
+          bookerEmail: booking.attendees[0].email,
+          bookerPhoneNumber: booking.attendees[0].phoneNumber ?? null,
+          eventTitle: booking.eventType?.title || null,
+          bookingTitle: booking.title,
+        }),
       };
 
       const paymentIntent = await this.stripe.paymentIntents.create(params, {
@@ -293,8 +296,29 @@ export class PaymentService implements IAbstractPaymentService {
 
       return paymentData;
     } catch (error) {
-      log.error("Stripe: Could not charge card for payment", _bookingId, safeStringify(error));
-      throw new Error(ErrorCode.ChargeCardFailure);
+      log.error("Stripe: Could not charge card for payment", bookingId, safeStringify(error));
+
+      const errorMappings = {
+        "your card was declined": "your_card_was_declined",
+        "your card does not support this type of purchase":
+          "your_card_does_not_support_this_type_of_purchase",
+        "amount must convert to at least": "amount_must_convert_to_at_least",
+      };
+
+      let userMessage = "could_not_charge_card";
+
+      if (error instanceof Error) {
+        const errorMessage = error.message.toLowerCase();
+
+        for (const [key, message] of Object.entries(errorMappings)) {
+          if (errorMessage.includes(key)) {
+            userMessage = message;
+            break;
+          }
+        }
+      }
+
+      throw new ErrorWithCode(ErrorCode.ChargeCardFailure, userMessage);
     }
   }
 
@@ -346,9 +370,14 @@ export class PaymentService implements IAbstractPaymentService {
     paymentData: Payment,
     eventTypeMetadata?: EventTypeMetadata
   ): Promise<void> {
+    const attendeesToEmail = event.attendeeSeatId
+      ? event.attendees.filter((attendee) => attendee.bookingSeat?.referenceUid === event.attendeeSeatId)
+      : event.attendees;
+
     await sendAwaitingPaymentEmailAndSMS(
       {
         ...event,
+        attendees: attendeesToEmail,
         paymentInfo: {
           link: createPaymentLink({
             paymentUid: paymentData.uid,
@@ -404,5 +433,37 @@ export class PaymentService implements IAbstractPaymentService {
 
   isSetupAlready(): boolean {
     return !!this.credentials;
+  }
+
+  private generateMetadata({
+    bookingId,
+    userId,
+    username,
+    bookerName,
+    bookerEmail,
+    bookerPhoneNumber,
+    eventTitle,
+    bookingTitle,
+  }: {
+    bookingId: number;
+    userId: number | null | undefined;
+    username: string | null | undefined;
+    bookerName: string;
+    bookerEmail: string;
+    bookerPhoneNumber: string | null;
+    eventTitle: string | null;
+    bookingTitle: string;
+  }) {
+    return {
+      identifier: "cal.com",
+      bookingId,
+      calAccountId: userId ?? null,
+      calUsername: username ?? null,
+      bookerName,
+      bookerEmail: bookerEmail,
+      bookerPhoneNumber: bookerPhoneNumber ?? null,
+      eventTitle: eventTitle || "",
+      bookingTitle: bookingTitle || "",
+    };
   }
 }

@@ -21,6 +21,8 @@ describe("DELETE /api/event-types/[id]", () => {
   beforeEach(() => {
     vi.resetAllMocks();
     // Mocking membership.findFirst
+    // eslint-disable-next-line @typescript-eslint/ban-ts-comment
+    // @ts-expect-error
     prismaMock.membership.findFirst.mockImplementation(({ where }) => {
       const { userId, teamId, accepted, role } = where;
       const mockData = [
@@ -48,6 +50,7 @@ describe("DELETE /api/event-types/[id]", () => {
     // Mocking team.findUnique
     prismaMock.team.findUnique.mockResolvedValue({
       id: teamId,
+      // @ts-expect-error requires mockDeep which will be introduced in the Prisma 6.7.0 upgrade, ignore for now.
       members: [
         { userId: memberUser, role: MembershipRole.MEMBER, teamId: teamId },
         { userId: adminUser, role: MembershipRole.ADMIN, teamId: teamId },
@@ -57,7 +60,7 @@ describe("DELETE /api/event-types/[id]", () => {
 
   describe("Error", async () => {
     test("Fails to remove event type if user is not OWNER/ADMIN of team associated with event type", async () => {
-      const { req, res } = createMocks<CustomNextApiRequest, CustomNextApiResponse>({
+      const { req } = createMocks<CustomNextApiRequest, CustomNextApiResponse>({
         method: "DELETE",
         body: {},
         query: {
@@ -68,15 +71,18 @@ describe("DELETE /api/event-types/[id]", () => {
       // Assign userId to the request objects
       req.userId = memberUser;
 
-      await handler(req, res);
-      expect(res.statusCode).toBe(403); // Check if the deletion was successful
+      await expect(handler(req)).rejects.toThrowError(
+        expect.objectContaining({
+          statusCode: 403,
+        })
+      );
     });
   });
 
   describe("Success", async () => {
     test("Removes event type if user is owner of team associated with event type", async () => {
       // Mocks for DELETE request
-      const { req, res } = createMocks<CustomNextApiRequest, CustomNextApiResponse>({
+      const { req } = createMocks<CustomNextApiRequest, CustomNextApiResponse>({
         method: "DELETE",
         body: {},
         query: {
@@ -87,8 +93,8 @@ describe("DELETE /api/event-types/[id]", () => {
       // Assign userId to the request objects
       req.userId = adminUser;
 
-      await handler(req, res);
-      expect(res.statusCode).toBe(200); // Check if the deletion was successful
+      const deletedEventType = await handler(req);
+      expect(deletedEventType).not.toBeNull();
     });
   });
 });

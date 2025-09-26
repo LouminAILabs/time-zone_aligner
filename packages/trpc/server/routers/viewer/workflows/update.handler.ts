@@ -1,14 +1,19 @@
-import { isSMSOrWhatsappAction } from "@calcom/features/ee/workflows/lib/actionHelperFunctions";
-import { IS_SELF_HOSTED } from "@calcom/lib/constants";
+import { createDefaultAIPhoneServiceProvider } from "@calcom/features/calAIPhone";
+import { isEmailAction } from "@calcom/features/ee/workflows/lib/actionHelperFunctions";
+import tasker from "@calcom/features/tasker";
+import { IS_SELF_HOSTED, SCANNING_WORKFLOW_STEPS } from "@calcom/lib/constants";
 import hasKeyInMetadata from "@calcom/lib/hasKeyInMetadata";
+import logger from "@calcom/lib/logger";
 import { WorkflowRepository } from "@calcom/lib/server/repository/workflow";
+import { addPermissionsToWorkflow } from "@calcom/lib/server/repository/workflow-permissions";
 import type { PrismaClient } from "@calcom/prisma";
-import { WorkflowActions } from "@calcom/prisma/enums";
-import type { TrpcSessionUser } from "@calcom/trpc/server/trpc";
+import { WorkflowActions, WorkflowTemplates } from "@calcom/prisma/enums";
+import { PhoneNumberSubscriptionStatus } from "@calcom/prisma/enums";
+import type { TrpcSessionUser } from "@calcom/trpc/server/types";
 
 import { TRPCError } from "@trpc/server";
 
-import { hasTeamPlanHandler } from "../teams/hasTeamPlan.handler";
+import hasActiveTeamPlanHandler from "../teams/hasActiveTeamPlan.handler";
 import type { TUpdateInputSchema } from "./update.schema";
 import {
   getSender,
@@ -20,15 +25,19 @@ import {
   verifyEmailSender,
   removeSmsReminderFieldForEventTypes,
   isStepEdited,
+  getEmailTemplateText,
+  upsertAIAgentCallPhoneNumberFieldForEventTypes,
+  removeAIAgentCallPhoneNumberFieldForEventTypes,
 } from "./util";
 
 type UpdateOptions = {
   ctx: {
-    user: NonNullable<TrpcSessionUser>;
+    user: Pick<NonNullable<TrpcSessionUser>, "id" | "metadata" | "locale" | "timeFormat" | "timeZone">;
     prisma: PrismaClient;
   };
   input: TUpdateInputSchema;
 };
+const log = logger.getSubLogger({ prefix: ["[Workflows.update] "] });
 
 export const updateHandler = async ({ ctx, input }: UpdateOptions) => {
   const { user } = ctx;
@@ -64,7 +73,7 @@ export const updateHandler = async ({ ctx, input }: UpdateOptions) => {
 
   const isOrg = !!userWorkflow?.team?.isOrganization;
 
-  const isUserAuthorized = await isAuthorized(userWorkflow, ctx.user.id, true);
+  const isUserAuthorized = await isAuthorized(userWorkflow, ctx.user.id, "workflow.update");
 
   if (!isUserAuthorized || !userWorkflow) {
     throw new TRPCError({ code: "UNAUTHORIZED" });
@@ -76,13 +85,11 @@ export const updateHandler = async ({ ctx, input }: UpdateOptions) => {
 
   const isCurrentUsernamePremium = hasKeyInMetadata(user, "isPremium") ? !!user.metadata.isPremium : false;
 
-  let isTeamsPlan = false;
+  let teamsPlan = { isActive: false, isTrial: false };
   if (!isCurrentUsernamePremium) {
-    const { hasTeamPlan } = await hasTeamPlanHandler({ ctx });
-    isTeamsPlan = !!hasTeamPlan;
+    teamsPlan = await hasActiveTeamPlanHandler({ ctx, input: { ownerOnly: false } });
   }
-  const hasPaidPlan = IS_SELF_HOSTED || isCurrentUsernamePremium || isTeamsPlan;
-
+  const hasPaidPlan = IS_SELF_HOSTED || isCurrentUsernamePremium || teamsPlan.isActive;
   let newActiveOn: number[] = [];
 
   let removedActiveOnIds: number[] = [];
@@ -263,133 +270,303 @@ export const updateHandler = async ({ ctx, input }: UpdateOptions) => {
       isOrg,
     });
 
-    await scheduleWorkflowNotifications(
+    await scheduleWorkflowNotifications({
       activeOn, // schedule for activeOn that stayed the same + new active on (old reminders were deleted)
       isOrg,
-      userWorkflow.steps, // use old steps here, edited and deleted steps are handled below
+      workflowSteps: userWorkflow.steps, // use old steps here, edited and deleted steps are handled below
       time,
       timeUnit,
       trigger,
-      user.id,
-      userWorkflow.teamId
-    );
+      userId: user.id,
+      teamId: userWorkflow.teamId,
+    });
   } else {
     // if trigger didn't change, only schedule reminders for all new activeOn
-    await scheduleWorkflowNotifications(
-      newActiveOn,
+    await scheduleWorkflowNotifications({
+      activeOn: newActiveOn,
       isOrg,
-      userWorkflow.steps, // use old steps here, edited and deleted steps are handled below
+      workflowSteps: userWorkflow.steps, // use old steps here, edited and deleted steps are handled below
       time,
       timeUnit,
       trigger,
-      user.id,
-      userWorkflow.teamId,
-      activeOn.filter((activeOn) => !newActiveOn.includes(activeOn)) // alreadyScheduledActiveOnIds
-    );
+      userId: user.id,
+      teamId: userWorkflow.teamId,
+      alreadyScheduledActiveOnIds: activeOn.filter((activeOn) => !newActiveOn.includes(activeOn)), // alreadyScheduledActiveOnIds
+    });
   }
 
   // handle deleted and edited workflow steps
-  userWorkflow.steps.map(async (oldStep) => {
-    const foundStep = steps.find((s) => s.id === oldStep.id);
-    let newStep;
+  await Promise.all(
+    userWorkflow.steps.map(async (oldStep) => {
+      const foundStep = steps.find((s) => s.id === oldStep.id);
+      let newStep;
 
-    if (foundStep) {
-      const { senderName, ...rest } = {
-        ...foundStep,
-        numberVerificationPending: false,
-        sender: getSender({
-          action: foundStep.action,
-          sender: foundStep.sender || null,
-          senderName: foundStep.senderName,
-        }),
-      };
-      newStep = rest;
-    }
+      if (foundStep) {
+        const { senderName, ...rest } = {
+          ...foundStep,
+          numberVerificationPending: false,
+          sender: getSender({
+            action: foundStep.action,
+            sender: foundStep.sender || null,
+            senderName: foundStep.senderName,
+          }),
+        };
+        newStep = rest;
+      }
 
-    const remindersFromStep = await ctx.prisma.workflowReminder.findMany({
-      where: {
-        workflowStepId: oldStep.id,
-      },
-      select: {
-        id: true,
-        referenceId: true,
-        method: true,
-        booking: {
-          select: {
-            eventTypeId: true,
+      const remindersFromStep = await ctx.prisma.workflowReminder.findMany({
+        where: {
+          workflowStepId: oldStep.id,
+        },
+        select: {
+          id: true,
+          referenceId: true,
+          method: true,
+          booking: {
+            select: {
+              eventTypeId: true,
+            },
           },
         },
-      },
-    });
-    //step was deleted
-    if (!newStep) {
-      // cancel all workflow reminders from deleted steps
-      await WorkflowRepository.deleteAllWorkflowReminders(remindersFromStep);
-
-      await ctx.prisma.workflowStep.delete({
-        where: {
-          id: oldStep.id,
-        },
       });
-    } else if (isStepEdited(oldStep, newStep)) {
-      // check if step that require team plan already existed before
-      if (!hasPaidPlan && !isSMSOrWhatsappAction(oldStep.action) && isSMSOrWhatsappAction(newStep.action)) {
-        throw new TRPCError({ code: "UNAUTHORIZED", message: "Not available on free plan" });
+      //step was deleted
+      if (!newStep) {
+        if (oldStep.action === WorkflowActions.CAL_AI_PHONE_CALL && !!oldStep.agentId) {
+          const agent = await ctx.prisma.agent.findUnique({
+            where: { id: oldStep.agentId ?? undefined },
+            select: {
+              id: true,
+              outboundPhoneNumbers: {
+                select: {
+                  id: true,
+                  phoneNumber: true,
+                  subscriptionStatus: true,
+                },
+              },
+            },
+          });
+
+          if (!agent) {
+            throw new TRPCError({
+              code: "NOT_FOUND",
+              message: `Agent ${oldStep.agentId} not found for cleanup`,
+            });
+          }
+
+          await WorkflowRepository.deleteAllWorkflowReminders(remindersFromStep);
+          await ctx.prisma.workflowStep.delete({
+            where: {
+              id: oldStep.id,
+            },
+          });
+
+          const aiPhoneService = createDefaultAIPhoneServiceProvider();
+          const externalErrors: string[] = [];
+
+          const phoneNumberOperations: Promise<any>[] = [];
+
+          if (agent.outboundPhoneNumbers) {
+            for (const phoneNumber of agent.outboundPhoneNumbers) {
+              if (phoneNumber.subscriptionStatus === PhoneNumberSubscriptionStatus.ACTIVE) {
+                try {
+                  phoneNumberOperations.push(
+                    aiPhoneService
+                      .cancelPhoneNumberSubscription({
+                        phoneNumberId: phoneNumber.id,
+                        userId: user.id,
+                      })
+                      .catch((error) => {
+                        const message = `Failed to cancel phone number subscription ${
+                          phoneNumber.phoneNumber
+                        }: ${error instanceof Error ? error.message : "Unknown error"}`;
+                        externalErrors.push(message);
+                        log.error(message);
+                      })
+                  );
+                } catch (error) {
+                  const message = `Failed to cancel phone number subscription ${phoneNumber.phoneNumber}: ${
+                    error instanceof Error ? error.message : "Unknown error"
+                  }`;
+                  externalErrors.push(message);
+                  log.error(message);
+                  phoneNumberOperations.push(Promise.resolve());
+                }
+              } else if (
+                phoneNumber.subscriptionStatus === null ||
+                phoneNumber.subscriptionStatus === undefined
+              ) {
+                try {
+                  phoneNumberOperations.push(
+                    aiPhoneService
+                      .deletePhoneNumber({
+                        phoneNumber: phoneNumber.phoneNumber,
+                        userId: user.id,
+                        deleteFromDB: true,
+                      })
+                      .catch((error) => {
+                        const message = `Failed to delete phone number ${phoneNumber.phoneNumber}: ${
+                          error instanceof Error ? error.message : "Unknown error"
+                        }`;
+                        externalErrors.push(message);
+                        log.error(message);
+                      })
+                  );
+                } catch (error) {
+                  const message = `Failed to delete phone number ${phoneNumber.phoneNumber}: ${
+                    error instanceof Error ? error.message : "Unknown error"
+                  }`;
+                  externalErrors.push(message);
+                  log.error(message);
+                  phoneNumberOperations.push(Promise.resolve());
+                }
+              }
+              // Skip cancelled phone numbers - they don't need any action
+            }
+          }
+
+          await Promise.all(phoneNumberOperations);
+
+          try {
+            await aiPhoneService.deleteAgent({
+              id: agent.id,
+              userId: user.id,
+              teamId: userWorkflow.teamId ?? undefined,
+            });
+          } catch (error) {
+            const message = `Failed to delete agent ${agent.id} from external service: ${
+              error instanceof Error ? error.message : "Unknown error"
+            }`;
+            externalErrors.push(message);
+            log.error(message);
+          }
+
+          // If there were external errors, we should log them for manual cleanup
+          // but the operation is considered successful since DB is consistent
+          if (externalErrors.length > 0) {
+            log.error(`External service cleanup errors for workflow step ${oldStep.id}:`, externalErrors);
+          }
+        } else {
+          // For non-AI phone steps, just delete reminders and step
+          await WorkflowRepository.deleteAllWorkflowReminders(remindersFromStep);
+          await ctx.prisma.workflowStep.delete({
+            where: {
+              id: oldStep.id,
+            },
+          });
+        }
+      } else if (
+        isStepEdited(oldStep, {
+          ...newStep,
+          verifiedAt: oldStep.verifiedAt,
+          agentId: newStep.agentId || null,
+        })
+      ) {
+        // check if step that require team plan already existed before
+        if (!hasPaidPlan && isEmailAction(newStep.action)) {
+          const isChangingToCustomTemplate =
+            newStep.template === WorkflowTemplates.CUSTOM && oldStep.template !== WorkflowTemplates.CUSTOM;
+
+          if (isChangingToCustomTemplate) {
+            throw new TRPCError({ code: "UNAUTHORIZED", message: "Not available on free plan" });
+          }
+
+          //if email body or subject was changed, change to predefined template
+          if (
+            newStep.emailSubject !== oldStep.emailSubject ||
+            newStep.reminderBody !== oldStep.reminderBody
+          ) {
+            // already existing custom templates can't be updated
+            if (newStep.template === WorkflowTemplates.CUSTOM) {
+              throw new TRPCError({ code: "UNAUTHORIZED", message: "Not available on free plan" });
+            }
+
+            // on free plans always use predefined templates
+            const { emailBody, emailSubject } = await getEmailTemplateText(newStep.template, {
+              locale: ctx.user.locale,
+              action: newStep.action,
+              timeFormat: ctx.user.timeFormat,
+            });
+
+            newStep = { ...newStep, reminderBody: emailBody, emailSubject };
+          }
+        }
+
+        // update step
+        const requiresSender =
+          newStep.action === WorkflowActions.SMS_NUMBER ||
+          newStep.action === WorkflowActions.WHATSAPP_NUMBER ||
+          newStep.action === WorkflowActions.EMAIL_ADDRESS;
+
+        if (newStep.action === WorkflowActions.EMAIL_ADDRESS) {
+          await verifyEmailSender(newStep.sendTo || "", user.id, userWorkflow.teamId);
+        }
+
+        const didBodyChange = newStep.reminderBody !== oldStep.reminderBody;
+
+        await ctx.prisma.workflowStep.update({
+          where: {
+            id: oldStep.id,
+          },
+          data: {
+            action: newStep.action,
+            sendTo: requiresSender ? newStep.sendTo : null,
+            stepNumber: newStep.stepNumber,
+            workflowId: newStep.workflowId,
+            reminderBody: newStep.reminderBody,
+            emailSubject: newStep.emailSubject,
+            template: newStep.template,
+            numberRequired: newStep.numberRequired,
+            sender: newStep.sender,
+            numberVerificationPending: false,
+            includeCalendarEvent: newStep.includeCalendarEvent,
+            agentId: newStep.agentId || null,
+            verifiedAt: !SCANNING_WORKFLOW_STEPS ? new Date() : didBodyChange ? null : oldStep.verifiedAt,
+          },
+        });
+
+        if (SCANNING_WORKFLOW_STEPS && didBodyChange) {
+          await tasker.create("scanWorkflowBody", {
+            workflowStepId: oldStep.id,
+            userId: ctx.user.id,
+            createdAt: new Date().toISOString(),
+          });
+        } else {
+          // schedule notifications for edited steps
+          await scheduleWorkflowNotifications({
+            activeOn,
+            isOrg,
+            workflowSteps: [newStep],
+            time,
+            timeUnit,
+            trigger,
+            userId: user.id,
+            teamId: userWorkflow.teamId,
+          });
+        }
+
+        // cancel all notifications of edited step
+        await WorkflowRepository.deleteAllWorkflowReminders(remindersFromStep);
       }
-
-      // update step
-      const requiresSender =
-        newStep.action === WorkflowActions.SMS_NUMBER ||
-        newStep.action === WorkflowActions.WHATSAPP_NUMBER ||
-        newStep.action === WorkflowActions.EMAIL_ADDRESS;
-
-      if (newStep.action === WorkflowActions.EMAIL_ADDRESS) {
-        await verifyEmailSender(newStep.sendTo || "", user.id, userWorkflow.teamId);
-      }
-
-      await ctx.prisma.workflowStep.update({
-        where: {
-          id: oldStep.id,
-        },
-        data: {
-          action: newStep.action,
-          sendTo: requiresSender ? newStep.sendTo : null,
-          stepNumber: newStep.stepNumber,
-          workflowId: newStep.workflowId,
-          reminderBody: newStep.reminderBody,
-          emailSubject: newStep.emailSubject,
-          template: newStep.template,
-          numberRequired: newStep.numberRequired,
-          sender: newStep.sender,
-          numberVerificationPending: false,
-          includeCalendarEvent: newStep.includeCalendarEvent,
-        },
-      });
-
-      // cancel all notifications of edited step
-      await WorkflowRepository.deleteAllWorkflowReminders(remindersFromStep);
-
-      // schedule notifications for edited steps
-      await scheduleWorkflowNotifications(
-        activeOn,
-        isOrg,
-        [newStep],
-        time,
-        timeUnit,
-        trigger,
-        user.id,
-        userWorkflow.teamId
-      );
-    }
-  });
+    })
+  );
 
   // handle added workflow steps
   const addedSteps = await Promise.all(
     steps
       .filter((step) => step.id <= 0)
       .map(async (newStep) => {
-        if (isSMSOrWhatsappAction(newStep.action) && !hasPaidPlan) {
-          throw new TRPCError({ code: "UNAUTHORIZED", message: "Not available on free plan" });
+        if (!hasPaidPlan && isEmailAction(newStep.action)) {
+          if (newStep.template === WorkflowTemplates.CUSTOM) {
+            throw new TRPCError({ code: "UNAUTHORIZED", message: "Not available on free plan" });
+          }
+          // on free plans always use predefined templates
+          const { emailBody, emailSubject } = await getEmailTemplateText(newStep.template, {
+            locale: ctx.user.locale,
+            action: newStep.action,
+            timeFormat: ctx.user.timeFormat,
+          });
+
+          newStep = { ...newStep, reminderBody: emailBody, emailSubject };
         }
 
         if (newStep.action === WorkflowActions.EMAIL_ADDRESS) {
@@ -418,22 +595,38 @@ export const updateHandler = async ({ ctx, input }: UpdateOptions) => {
     const createdSteps = await Promise.all(
       addedSteps.map((step) =>
         ctx.prisma.workflowStep.create({
-          data: { ...step, numberVerificationPending: false },
+          data: {
+            ...step,
+            numberVerificationPending: false,
+            ...(!SCANNING_WORKFLOW_STEPS ? { verifiedAt: new Date() } : {}),
+          },
         })
       )
     );
 
-    // schedule notification for new step
-    await scheduleWorkflowNotifications(
-      activeOn,
-      isOrg,
-      createdSteps,
-      time,
-      timeUnit,
-      trigger,
-      user.id,
-      userWorkflow.teamId
-    );
+    if (SCANNING_WORKFLOW_STEPS) {
+      await Promise.all(
+        createdSteps.map((step) =>
+          tasker.create("scanWorkflowBody", {
+            workflowStepId: step.id,
+            userId: ctx.user.id,
+            createdAt: new Date().toISOString(),
+          })
+        )
+      );
+    } else {
+      // schedule notification for new step
+      await scheduleWorkflowNotifications({
+        activeOn,
+        isOrg,
+        workflowSteps: createdSteps,
+        time,
+        timeUnit,
+        trigger,
+        userId: user.id,
+        teamId: userWorkflow.teamId,
+      });
+    }
   }
 
   //update trigger, name, time, timeUnit
@@ -450,7 +643,7 @@ export const updateHandler = async ({ ctx, input }: UpdateOptions) => {
     },
   });
 
-  const workflow = await ctx.prisma.workflow.findFirst({
+  const workflow = await ctx.prisma.workflow.findUnique({
     where: {
       id,
     },
@@ -481,6 +674,13 @@ export const updateHandler = async ({ ctx, input }: UpdateOptions) => {
       },
     },
   });
+
+  if (!workflow) {
+    throw new TRPCError({
+      code: "NOT_FOUND",
+      message: "Workflow not found after update",
+    });
+  }
 
   // Remove or add booking field for sms reminder number
   const smsReminderNumberNeeded =
@@ -515,7 +715,103 @@ export const updateHandler = async ({ ctx, input }: UpdateOptions) => {
     });
   }
 
+  // Remove or add attendeePhoneNumber field for AI phone call actions
+  const aiPhoneCallStepsNeeded =
+    activeOn.length && steps.some((s) => s.action === WorkflowActions.CAL_AI_PHONE_CALL);
+
+  await removeAIAgentCallPhoneNumberFieldForEventTypes({
+    activeOnToRemove: removedActiveOnIds,
+    workflowId: id,
+    isOrg,
+    activeOn,
+  });
+
+  if (!aiPhoneCallStepsNeeded) {
+    await removeAIAgentCallPhoneNumberFieldForEventTypes({
+      activeOnToRemove: activeOnWithChildren,
+      workflowId: id,
+      isOrg,
+    });
+  } else {
+    await upsertAIAgentCallPhoneNumberFieldForEventTypes({
+      activeOn: activeOnWithChildren,
+      workflowId: id,
+      isAIAgentCallPhoneNumberRequired: steps.some((s) => s.action === WorkflowActions.CAL_AI_PHONE_CALL),
+      isOrg,
+    });
+  }
+
+  const aiPhoneCallSteps = steps.filter((s) => s.action === WorkflowActions.CAL_AI_PHONE_CALL && s.agentId);
+  if (aiPhoneCallSteps.length > 0) {
+    const aiService = createDefaultAIPhoneServiceProvider();
+    const externalToolErrors: string[] = [];
+
+    await Promise.all(
+      aiPhoneCallSteps.map(async (step) => {
+        if (!step.agentId) return;
+
+        try {
+          const agent = await ctx.prisma.agent.findUnique({
+            where: { id: step.agentId },
+            select: { providerAgentId: true },
+          });
+
+          if (!agent?.providerAgentId) {
+            log.error(`Agent not found for step ${step.id} agentId ${step.agentId}`);
+            return;
+          }
+
+          if (removedActiveOnIds.length > 0) {
+            try {
+              await aiService.removeToolsForEventTypes(agent.providerAgentId, removedActiveOnIds);
+            } catch (error) {
+              const message = `Failed to remove tools for removed event types from agent ${
+                agent.providerAgentId
+              }: ${error instanceof Error ? error.message : "Unknown error"}`;
+              externalToolErrors.push(message);
+              log.error(message);
+            }
+          }
+
+          if (newActiveOn.length > 0) {
+            await Promise.all(
+              newActiveOn.map(async (eventTypeId) => {
+                try {
+                  await aiService.updateToolsFromAgentId(agent.providerAgentId, {
+                    eventTypeId,
+                    timeZone: user?.timeZone ?? "Europe/London",
+                    userId: user.id,
+                    teamId: userWorkflow.teamId || undefined,
+                  });
+                } catch (error) {
+                  const message = `${error instanceof Error ? error.message : "Unknown error"}`;
+                  externalToolErrors.push(message);
+                  log.error(message);
+                }
+              })
+            );
+          }
+        } catch (error) {
+          const message = `Failed to update agent tools for step ${step.id}: ${
+            error instanceof Error ? error.message : "Unknown error"
+          }`;
+          externalToolErrors.push(message);
+          log.error(message);
+        }
+      })
+    );
+
+    if (externalToolErrors.length > 0) {
+      log.error(`Agent tool update errors for workflow ${id}:`, externalToolErrors);
+      throw new TRPCError({
+        code: "INTERNAL_SERVER_ERROR",
+        message: externalToolErrors.join("; "),
+      });
+    }
+  }
+
+  const workflowWithPermissions = await addPermissionsToWorkflow(workflow, ctx.user.id);
   return {
-    workflow,
+    workflow: workflowWithPermissions,
   };
 };

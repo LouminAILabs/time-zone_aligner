@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect } from "react";
-import { create } from "zustand";
+import { createWithEqualityFn } from "zustand/traditional";
 
 import dayjs from "@calcom/dayjs";
 import { BOOKER_NUMBER_OF_DAYS_TO_LOAD } from "@calcom/lib/constants";
@@ -15,7 +15,7 @@ import { updateQueryParam, getQueryParam, removeQueryParam } from "./utils/query
  * Arguments passed into store initializer, containing
  * the event data.
  */
-type StoreInitializeType = {
+export type StoreInitializeType = {
   username: string;
   eventSlug: string;
   // Month can be undefined if it's not passed in as a prop.
@@ -32,7 +32,13 @@ type StoreInitializeType = {
   durationConfig?: number[] | null;
   org?: string | null;
   isInstantMeeting?: boolean;
+  timezone?: string | null;
   teamMemberEmail?: string | null;
+  crmOwnerRecordType?: string | null;
+  crmAppSlug?: string | null;
+  crmRecordId?: string | null;
+  isPlatform?: boolean;
+  allowUpdatingUrlParams?: boolean;
 };
 
 type SeatedEventData = {
@@ -57,6 +63,12 @@ export type BookerStore = {
   verifiedEmail: string | null;
   setVerifiedEmail: (email: string | null) => void;
   /**
+   * Verification code for email verification.
+   * Stored after successful verification to be included in booking request
+   */
+  verificationCode: string | null;
+  setVerificationCode: (code: string | null) => void;
+  /**
    * Current month being viewed. Format is YYYY-MM.
    */
   month: string | null;
@@ -77,7 +89,11 @@ export type BookerStore = {
    * Date selected by user (exact day). Format is YYYY-MM-DD.
    */
   selectedDate: string | null;
-  setSelectedDate: (date: string | null) => void;
+  setSelectedDate: (params: {
+    date: string | null;
+    omitUpdatingParams?: boolean;
+    preventMonthSwitching?: boolean;
+  }) => void;
   addToSelectedDate: (days: number) => void;
   /**
    * Multiple Selected Dates and Times
@@ -99,6 +115,8 @@ export type BookerStore = {
    */
   selectedTimeslot: string | null;
   setSelectedTimeslot: (timeslot: string | null) => void;
+  tentativeSelectedTimeslots: string[];
+  setTentativeSelectedTimeslots: (slots: string[]) => void;
   /**
    * Number of recurring events to create.
    */
@@ -131,7 +149,7 @@ export type BookerStore = {
   initialize: (data: StoreInitializeType) => void;
   /**
    * Stored form state, used when user navigates back and
-   * forth between timeslots and form. Get's cleared on submit
+   * forth between timeslots and form. Gets cleared on submit
    * to prevent sticky data.
    */
   formValues: Record<string, any>;
@@ -150,219 +168,287 @@ export type BookerStore = {
   org?: string | null;
   setOrg: (org: string | null | undefined) => void;
 
+  timezone: string | null;
+  setTimezone: (timezone: string | null) => void;
+
   teamMemberEmail?: string | null;
+  crmOwnerRecordType?: string | null;
+  crmAppSlug?: string | null;
+  crmRecordId?: string | null;
+  isPlatform?: boolean;
+  allowUpdatingUrlParams?: boolean;
 };
 
 /**
- * The booker store contains the data of the component's
- * current state. This data can be reused within child components
- * by importing this hook.
- *
- * See comments in interface above for more information on it's specific values.
+ * Creates a new booker store instance
  */
-export const useBookerStore = create<BookerStore>((set, get) => ({
-  state: "loading",
-  setState: (state: BookerState) => set({ state }),
-  layout: BookerLayouts.MONTH_VIEW,
-  setLayout: (layout: BookerLayout) => {
-    // If we switch to a large layout and don't have a date selected yet,
-    // we selected it here, so week title is rendered properly.
-    if (["week_view", "column_view"].includes(layout) && !get().selectedDate) {
-      set({ selectedDate: dayjs().format("YYYY-MM-DD") });
-    }
-    updateQueryParam("layout", layout);
-    return set({ layout });
-  },
-  selectedDate: getQueryParam("date") || null,
-  setSelectedDate: (selectedDate: string | null) => {
-    // unset selected date
-    if (!selectedDate) {
-      removeQueryParam("date");
-      return;
-    }
+export const createBookerStore = () =>
+  createWithEqualityFn<BookerStore>((set, get) => ({
+    state: "loading",
+    setState: (state: BookerState) => set({ state }),
+    layout: BookerLayouts.MONTH_VIEW,
+    setLayout: (layout: BookerLayout) => {
+      // If we switch to a large layout and don't have a date selected yet,
+      // we selected it here, so week title is rendered properly.
+      if (["week_view", "column_view"].includes(layout) && !get().selectedDate) {
+        set({ selectedDate: dayjs().format("YYYY-MM-DD") });
+      }
+      if (!get().isPlatform || get().allowUpdatingUrlParams) {
+        updateQueryParam("layout", layout);
+      }
+      return set({ layout });
+    },
+    selectedDate: getQueryParam("date") || null,
+    setSelectedDate: ({ date: selectedDate, omitUpdatingParams = false, preventMonthSwitching = false }) => {
+      // unset selected date
+      if (!selectedDate) {
+        removeQueryParam("date");
+        return;
+      }
 
-    const currentSelection = dayjs(get().selectedDate);
-    const newSelection = dayjs(selectedDate);
-    set({ selectedDate });
-    updateQueryParam("date", selectedDate ?? "");
+      const currentSelection = dayjs(get().selectedDate);
+      const newSelection = dayjs(selectedDate);
+      set({ selectedDate });
+      if (!omitUpdatingParams && (!get().isPlatform || get().allowUpdatingUrlParams)) {
+        updateQueryParam("date", selectedDate ?? "");
+      }
 
-    // Setting month make sure small calendar in fullscreen layouts also updates.
-    if (newSelection.month() !== currentSelection.month()) {
-      set({ month: newSelection.format("YYYY-MM") });
-      updateQueryParam("month", newSelection.format("YYYY-MM"));
-    }
-  },
-  selectedDatesAndTimes: null,
-  setSelectedDatesAndTimes: (selectedDatesAndTimes) => {
-    set({ selectedDatesAndTimes });
-  },
-  addToSelectedDate: (days: number) => {
-    const currentSelection = dayjs(get().selectedDate);
-    const newSelection = currentSelection.add(days, "day");
-    const newSelectionFormatted = newSelection.format("YYYY-MM-DD");
+      // Setting month make sure small calendar in fullscreen layouts also updates.
+      // preventMonthSwitching is true in monthly view
+      if (!preventMonthSwitching && newSelection.month() !== currentSelection.month()) {
+        set({ month: newSelection.format("YYYY-MM") });
+        if (!omitUpdatingParams && (!get().isPlatform || get().allowUpdatingUrlParams)) {
+          updateQueryParam("month", newSelection.format("YYYY-MM"));
+        }
+      }
+    },
+    selectedDatesAndTimes: null,
+    setSelectedDatesAndTimes: (selectedDatesAndTimes) => {
+      set({ selectedDatesAndTimes });
+    },
+    addToSelectedDate: (days: number) => {
+      const currentSelection = dayjs(get().selectedDate);
+      let newSelection = currentSelection.add(days, "day");
 
-    if (newSelection.month() !== currentSelection.month()) {
-      set({ month: newSelection.format("YYYY-MM") });
-      updateQueryParam("month", newSelection.format("YYYY-MM"));
-    }
+      // If newSelection is before the current date, set it to today
+      if (newSelection.isBefore(dayjs(), "day")) {
+        newSelection = dayjs();
+      }
 
-    set({ selectedDate: newSelectionFormatted });
-    updateQueryParam("date", newSelectionFormatted);
-  },
-  username: null,
-  eventSlug: null,
-  eventId: null,
-  rescheduledBy: null,
-  verifiedEmail: null,
-  setVerifiedEmail: (email: string | null) => {
-    set({ verifiedEmail: email });
-  },
-  month: getQueryParam("month") || getQueryParam("date") || dayjs().format("YYYY-MM"),
-  setMonth: (month: string | null) => {
-    if (!month) {
-      removeQueryParam("month");
-      return;
-    }
-    set({ month, selectedTimeslot: null });
-    updateQueryParam("month", month ?? "");
-    get().setSelectedDate(null);
-  },
-  dayCount: BOOKER_NUMBER_OF_DAYS_TO_LOAD > 0 ? BOOKER_NUMBER_OF_DAYS_TO_LOAD : null,
-  setDayCount: (dayCount: number | null) => {
-    set({ dayCount });
-  },
-  isTeamEvent: false,
-  seatedEventData: {
-    seatsPerTimeSlot: undefined,
-    attendees: undefined,
-    bookingUid: undefined,
-    showAvailableSeatsCount: true,
-  },
-  setSeatedEventData: (seatedEventData: SeatedEventData) => {
-    set({ seatedEventData });
-    updateQueryParam("bookingUid", seatedEventData.bookingUid ?? "null");
-  },
-  initialize: ({
-    username,
-    eventSlug,
-    month,
-    eventId,
-    rescheduleUid = null,
-    rescheduledBy = null,
-    bookingUid = null,
-    bookingData = null,
-    layout,
-    isTeamEvent,
-    durationConfig,
-    org,
-    isInstantMeeting,
-    teamMemberEmail,
-  }: StoreInitializeType) => {
-    const selectedDateInStore = get().selectedDate;
+      const newSelectionFormatted = newSelection.format("YYYY-MM-DD");
 
-    if (
-      get().username === username &&
-      get().eventSlug === eventSlug &&
-      get().month === month &&
-      get().eventId === eventId &&
-      get().rescheduleUid === rescheduleUid &&
-      get().bookingUid === bookingUid &&
-      get().bookingData?.responses.email === bookingData?.responses.email &&
-      get().layout === layout &&
-      get().rescheduledBy === rescheduledBy &&
-      get().teamMemberEmail
-    )
-      return;
-    set({
+      if (newSelection.month() !== currentSelection.month()) {
+        set({ month: newSelection.format("YYYY-MM") });
+        if (!get().isPlatform || get().allowUpdatingUrlParams) {
+          updateQueryParam("month", newSelection.format("YYYY-MM"));
+        }
+      }
+
+      set({ selectedDate: newSelectionFormatted });
+      if (!get().isPlatform || get().allowUpdatingUrlParams) {
+        updateQueryParam("date", newSelectionFormatted);
+      }
+    },
+    username: null,
+    eventSlug: null,
+    eventId: null,
+    rescheduledBy: null,
+    verifiedEmail: null,
+    setVerifiedEmail: (email: string | null) => {
+      set({ verifiedEmail: email });
+    },
+    verificationCode: null,
+    setVerificationCode: (code: string | null) => {
+      set({ verificationCode: code });
+    },
+    month:
+      getQueryParam("month") ||
+      (getQueryParam("date") && dayjs(getQueryParam("date")).isValid()
+        ? dayjs(getQueryParam("date")).format("YYYY-MM")
+        : null) ||
+      dayjs().format("YYYY-MM"),
+    setMonth: (month: string | null) => {
+      if (!month) {
+        removeQueryParam("month");
+        return;
+      }
+      set({ month, selectedTimeslot: null });
+      if (!get().isPlatform || get().allowUpdatingUrlParams) {
+        updateQueryParam("month", month ?? "");
+      }
+      get().setSelectedDate({ date: null });
+    },
+    dayCount: BOOKER_NUMBER_OF_DAYS_TO_LOAD > 0 ? BOOKER_NUMBER_OF_DAYS_TO_LOAD : null,
+    setDayCount: (dayCount: number | null) => {
+      set({ dayCount });
+    },
+    isTeamEvent: false,
+    seatedEventData: {
+      seatsPerTimeSlot: undefined,
+      attendees: undefined,
+      bookingUid: undefined,
+      showAvailableSeatsCount: true,
+    },
+    setSeatedEventData: (seatedEventData: SeatedEventData) => {
+      set({ seatedEventData });
+      if (!get().isPlatform || get().allowUpdatingUrlParams) {
+        updateQueryParam("bookingUid", seatedEventData.bookingUid ?? "null");
+      }
+    },
+    // This is different from timeZone in timePreferencesStore, because timeZone in timePreferencesStore is the preferred timezone of the booker,
+    // it is the timezone configured through query param. So, this is in a way the preference of the person who shared the link.
+    // it is the timezone configured through query param. So, this is in a way the preference of the person who shared the link.
+    timezone: getQueryParam("cal.tz") ?? null,
+    setTimezone: (timezone: string | null) => {
+      set({ timezone });
+    },
+    initialize: ({
       username,
       eventSlug,
+      month,
       eventId,
-      org,
-      rescheduleUid,
-      rescheduledBy,
-      bookingUid,
-      bookingData,
-      layout: layout || BookerLayouts.MONTH_VIEW,
-      isTeamEvent: isTeamEvent || false,
+      rescheduleUid = null,
+      rescheduledBy = null,
+      bookingUid = null,
+      bookingData = null,
+      layout,
+      isTeamEvent,
       durationConfig,
-      // Preselect today's date in week / column view, since they use this to show the week title.
-      selectedDate:
-        selectedDateInStore ||
-        (["week_view", "column_view"].includes(layout) ? dayjs().format("YYYY-MM-DD") : null),
+      org,
+      isInstantMeeting,
+      timezone = null,
       teamMemberEmail,
-    });
+      crmOwnerRecordType,
+      crmAppSlug,
+      crmRecordId,
+      isPlatform = false,
+      allowUpdatingUrlParams = true,
+    }: StoreInitializeType) => {
+      const selectedDateInStore = get().selectedDate;
 
-    if (durationConfig?.includes(Number(getQueryParam("duration")))) {
+      if (
+        get().username === username &&
+        get().eventSlug === eventSlug &&
+        get().month === month &&
+        get().eventId === eventId &&
+        get().rescheduleUid === rescheduleUid &&
+        get().bookingUid === bookingUid &&
+        get().bookingData?.responses.email === bookingData?.responses.email &&
+        get().layout === layout &&
+        get().timezone === timezone &&
+        get().rescheduledBy === rescheduledBy &&
+        get().teamMemberEmail === teamMemberEmail &&
+        get().crmOwnerRecordType === crmOwnerRecordType &&
+        get().crmAppSlug === crmAppSlug &&
+        get().crmRecordId === crmRecordId
+      )
+        return;
       set({
-        selectedDuration: Number(getQueryParam("duration")),
+        username,
+        eventSlug,
+        eventId,
+        org,
+        rescheduleUid,
+        rescheduledBy,
+        bookingUid,
+        bookingData,
+        layout: layout || BookerLayouts.MONTH_VIEW,
+        isTeamEvent: isTeamEvent || false,
+        durationConfig,
+        timezone,
+        // Preselect today's date in week / column view, since they use this to show the week title.
+        selectedDate:
+          selectedDateInStore ||
+          (["week_view", "column_view"].includes(layout) ? dayjs().format("YYYY-MM-DD") : null),
+        teamMemberEmail,
+        crmOwnerRecordType,
+        crmAppSlug,
+        crmRecordId,
+        isPlatform,
+        allowUpdatingUrlParams,
       });
-    } else {
-      removeQueryParam("duration");
-    }
 
-    // Unset selected timeslot if user is rescheduling. This could happen
-    // if the user reschedules a booking right after the confirmation page.
-    // In that case the time would still be store in the store, this way we
-    // force clear this.
-    // Also, fetch the original booking duration if user is rescheduling and
-    // update the selectedDuration
-    if (rescheduleUid && bookingData) {
-      set({ selectedTimeslot: null });
-      const originalBookingLength = dayjs(bookingData?.endTime).diff(
-        dayjs(bookingData?.startTime),
-        "minutes"
-      );
-      set({ selectedDuration: originalBookingLength });
-      updateQueryParam("duration", originalBookingLength ?? "");
-    }
-    if (month) set({ month });
+      if (durationConfig?.includes(Number(getQueryParam("duration")))) {
+        set({
+          selectedDuration: Number(getQueryParam("duration")),
+        });
+      } else {
+        removeQueryParam("duration");
+      }
 
-    if (isInstantMeeting) {
-      const month = dayjs().format("YYYY-MM");
-      const selectedDate = dayjs().format("YYYY-MM-DD");
-      const selectedTimeslot = new Date().toISOString();
-      set({
-        month,
-        selectedDate,
-        selectedTimeslot,
-        isInstantMeeting,
-      });
-      updateQueryParam("month", month);
-      updateQueryParam("date", selectedDate ?? "");
-      updateQueryParam("slot", selectedTimeslot ?? "", false);
-    }
-    //removeQueryParam("layout");
-  },
-  durationConfig: null,
-  selectedDuration: null,
-  setSelectedDuration: (selectedDuration: number | null) => {
-    set({ selectedDuration });
-    updateQueryParam("duration", selectedDuration ?? "");
-  },
-  setBookingData: (bookingData: GetBookingType | null | undefined) => {
-    set({ bookingData: bookingData ?? null });
-  },
-  recurringEventCount: null,
-  setRecurringEventCount: (recurringEventCount: number | null) => set({ recurringEventCount }),
-  occurenceCount: null,
-  setOccurenceCount: (occurenceCount: number | null) => set({ occurenceCount }),
-  rescheduleUid: null,
-  bookingData: null,
-  bookingUid: null,
-  selectedTimeslot: getQueryParam("slot") || null,
-  setSelectedTimeslot: (selectedTimeslot: string | null) => {
-    set({ selectedTimeslot });
-    updateQueryParam("slot", selectedTimeslot ?? "", false);
-  },
-  formValues: {},
-  setFormValues: (formValues: Record<string, any>) => {
-    set({ formValues });
-  },
-  org: null,
-  setOrg: (org: string | null | undefined) => {
-    set({ org });
-  },
-}));
+      // Unset selected timeslot if user is rescheduling. This could happen
+      // if the user reschedules a booking right after the confirmation page.
+      // In that case the time would still be store in the store, this way we
+      // force clear this.
+      if (rescheduleUid && bookingData) {
+        set({ selectedTimeslot: null });
+      }
+      if (month) set({ month });
+
+      if (isInstantMeeting) {
+        const month = dayjs().format("YYYY-MM");
+        const selectedDate = dayjs().format("YYYY-MM-DD");
+        const selectedTimeslot = new Date().toISOString();
+        set({
+          month,
+          selectedDate,
+          selectedTimeslot,
+          isInstantMeeting,
+        });
+
+        if (!isPlatform || allowUpdatingUrlParams) {
+          updateQueryParam("month", month);
+          updateQueryParam("date", selectedDate ?? "");
+          updateQueryParam("slot", selectedTimeslot ?? "", false);
+        }
+      }
+      //removeQueryParam("layout");
+    },
+    durationConfig: null,
+    selectedDuration: null,
+    setSelectedDuration: (selectedDuration: number | null) => {
+      set({ selectedDuration });
+      if (!get().isPlatform || get().allowUpdatingUrlParams) {
+        updateQueryParam("duration", selectedDuration ?? "");
+      }
+    },
+    setBookingData: (bookingData: GetBookingType | null | undefined) => {
+      set({ bookingData: bookingData ?? null });
+    },
+    recurringEventCount: null,
+    setRecurringEventCount: (recurringEventCount: number | null) => set({ recurringEventCount }),
+    occurenceCount: null,
+    setOccurenceCount: (occurenceCount: number | null) => set({ occurenceCount }),
+    rescheduleUid: null,
+    bookingData: null,
+    bookingUid: null,
+    selectedTimeslot: getQueryParam("slot") || null,
+    tentativeSelectedTimeslots: [],
+    setTentativeSelectedTimeslots: (tentativeSelectedTimeslots: string[]) => {
+      set({ tentativeSelectedTimeslots });
+    },
+    setSelectedTimeslot: (selectedTimeslot: string | null) => {
+      set({ selectedTimeslot });
+      if (!get().isPlatform || get().allowUpdatingUrlParams) {
+        updateQueryParam("slot", selectedTimeslot ?? "", false);
+      }
+    },
+    formValues: {},
+    setFormValues: (formValues: Record<string, any>) => {
+      set({ formValues });
+    },
+    org: null,
+    setOrg: (org: string | null | undefined) => {
+      set({ org });
+    },
+    isPlatform: false,
+    allowUpdatingUrlParams: true,
+  }));
+
+/**
+ * Default global store instance for backward compatibility
+ */
+export const useBookerStore = createBookerStore();
 
 export const useInitializeBookerStore = ({
   username,
@@ -378,7 +464,13 @@ export const useInitializeBookerStore = ({
   durationConfig,
   org,
   isInstantMeeting,
+  timezone = null,
   teamMemberEmail,
+  crmOwnerRecordType,
+  crmAppSlug,
+  crmRecordId,
+  isPlatform = false,
+  allowUpdatingUrlParams = true,
 }: StoreInitializeType) => {
   const initializeStore = useBookerStore((state) => state.initialize);
   useEffect(() => {
@@ -396,7 +488,13 @@ export const useInitializeBookerStore = ({
       verifiedEmail,
       durationConfig,
       isInstantMeeting,
+      timezone,
       teamMemberEmail,
+      crmOwnerRecordType,
+      crmAppSlug,
+      crmRecordId,
+      isPlatform,
+      allowUpdatingUrlParams,
     });
   }, [
     initializeStore,
@@ -413,6 +511,12 @@ export const useInitializeBookerStore = ({
     verifiedEmail,
     durationConfig,
     isInstantMeeting,
+    timezone,
     teamMemberEmail,
+    crmOwnerRecordType,
+    crmAppSlug,
+    crmRecordId,
+    isPlatform,
+    allowUpdatingUrlParams,
   ]);
 };

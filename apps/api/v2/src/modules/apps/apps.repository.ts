@@ -1,7 +1,8 @@
 import { PrismaReadService } from "@/modules/prisma/prisma-read.service";
 import { PrismaWriteService } from "@/modules/prisma/prisma-write.service";
 import { Injectable } from "@nestjs/common";
-import { App, Prisma } from "@prisma/client";
+
+import type { App, Prisma } from "@calcom/prisma/client";
 
 @Injectable()
 export class AppsRepository {
@@ -22,6 +23,24 @@ export class AppsRepository {
     });
   }
 
+  async deleteAppCredentials(credentialIdsToDelete: number[], userId: number) {
+    return this.dbWrite.prisma.credential.deleteMany({
+      where: {
+        id: { in: credentialIdsToDelete },
+        userId,
+      },
+    });
+  }
+
+  async deleteTeamAppCredentials(credentialIdsToDelete: number[], teamId: number) {
+    return this.dbWrite.prisma.credential.deleteMany({
+      where: {
+        id: { in: credentialIdsToDelete },
+        teamId,
+      },
+    });
+  }
+
   async createTeamAppCredential(type: string, key: Prisma.InputJsonValue, teamId: number, appId: string) {
     return this.dbWrite.prisma.credential.create({
       data: {
@@ -29,6 +48,30 @@ export class AppsRepository {
         key: key,
         teamId: teamId,
         appId: appId,
+      },
+    });
+  }
+
+  async findAppCredential({
+    type,
+    appId,
+    userId,
+    teamId,
+  }: {
+    type: string;
+    appId: string;
+    userId?: number;
+    teamId?: number;
+  }) {
+    return this.dbWrite.prisma.credential.findMany({
+      select: {
+        id: true,
+      },
+      where: {
+        type,
+        userId,
+        teamId,
+        appId,
       },
     });
   }

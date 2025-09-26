@@ -79,6 +79,22 @@ describe("POST /api/selected-calendars", () => {
         integration: "google",
         externalId: "ext123",
         userId: 444444,
+        id: "f47ac10b-58cc-4372-a567-0e02b2c3d479",
+        eventTypeId: null,
+        delegationCredentialId: null,
+        domainWideDelegationCredentialId: null,
+        googleChannelId: null,
+        googleChannelKind: null,
+        googleChannelResourceId: null,
+        googleChannelResourceUri: null,
+        googleChannelExpiration: null,
+        error: null,
+        lastErrorAt: null,
+        watchAttempts: 0,
+        maxAttempts: 3,
+        unwatchAttempts: 0,
+        createdAt: new Date(),
+        updatedAt: new Date(),
       });
 
       await handler(req, res);
@@ -104,10 +120,26 @@ describe("POST /api/selected-calendars", () => {
       req.userId = 333333;
 
       prismaMock.selectedCalendar.create.mockResolvedValue({
+        id: "f47ac10b-58cc-4372-a567-0e02b2c3d479",
         credentialId: 1,
         integration: "google",
         externalId: "ext123",
         userId: 333333,
+        googleChannelId: null,
+        googleChannelKind: null,
+        googleChannelResourceId: null,
+        googleChannelResourceUri: null,
+        googleChannelExpiration: null,
+        delegationCredentialId: null,
+        domainWideDelegationCredentialId: null,
+        eventTypeId: null,
+        error: null,
+        lastErrorAt: null,
+        watchAttempts: 0,
+        maxAttempts: 3,
+        unwatchAttempts: 0,
+        createdAt: new Date(),
+        updatedAt: new Date(),
       });
 
       await handler(req, res);

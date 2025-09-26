@@ -1,12 +1,11 @@
-import { usePathname } from "next/navigation";
 import { shallow } from "zustand/shallow";
 
-import { useSchedule } from "@calcom/features/schedules";
+import { useBookerStoreContext } from "@calcom/features/bookings/Booker/BookerStoreProvider";
+import { useSchedule } from "@calcom/features/schedules/lib/use-schedule/useSchedule";
 import { useCompatSearchParams } from "@calcom/lib/hooks/useCompatSearchParams";
 import { trpc } from "@calcom/trpc/react";
 
-import { useTimePreferences } from "../../lib/timePreferences";
-import { useBookerStore } from "../store";
+import { useBookerTime } from "../components/hooks/useBookerTime";
 
 export type useEventReturnType = ReturnType<typeof useEvent>;
 export type useScheduleForEventReturnType = ReturnType<typeof useScheduleForEvent>;
@@ -19,8 +18,8 @@ export type useScheduleForEventReturnType = ReturnType<typeof useScheduleForEven
  * Using this hook means you only need to use one hook, instead
  * of combining multiple conditional hooks.
  */
-export const useEvent = (props?: { fromRedirectOfNonOrgLink?: boolean }) => {
-  const [username, eventSlug, isTeamEvent, org] = useBookerStore(
+export const useEvent = (props?: { fromRedirectOfNonOrgLink?: boolean; disabled?: boolean }) => {
+  const [username, eventSlug, isTeamEvent, org] = useBookerStoreContext(
     (state) => [state.username, state.eventSlug, state.isTeamEvent, state.org],
     shallow
   );
@@ -35,7 +34,7 @@ export const useEvent = (props?: { fromRedirectOfNonOrgLink?: boolean }) => {
     },
     {
       refetchOnWindowFocus: false,
-      enabled: Boolean(username) && Boolean(eventSlug),
+      enabled: !props?.disabled && Boolean(username) && Boolean(eventSlug),
     }
   );
 
@@ -71,8 +70,8 @@ export const useScheduleForEvent = ({
   selectedDate,
   orgSlug,
   teamMemberEmail,
-  fromRedirectOfNonOrgLink,
   isTeamEvent,
+  useApiV2 = true,
 }: {
   prefetchNextMonth?: boolean;
   username?: string | null;
@@ -87,17 +86,16 @@ export const useScheduleForEvent = ({
   teamMemberEmail?: string | null;
   fromRedirectOfNonOrgLink?: boolean;
   isTeamEvent?: boolean;
+  useApiV2?: boolean;
 } = {}) => {
-  const { timezone } = useTimePreferences();
-  const [usernameFromStore, eventSlugFromStore, monthFromStore, durationFromStore] = useBookerStore(
+  const { timezone } = useBookerTime();
+  const [usernameFromStore, eventSlugFromStore, monthFromStore, durationFromStore] = useBookerStoreContext(
     (state) => [state.username, state.eventSlug, state.month, state.selectedDuration],
     shallow
   );
 
   const searchParams = useCompatSearchParams();
   const rescheduleUid = searchParams?.get("rescheduleUid");
-
-  const pathname = usePathname();
 
   const schedule = useSchedule({
     username: usernameFromStore ?? username,
@@ -114,6 +112,7 @@ export const useScheduleForEvent = ({
     isTeamEvent,
     orgSlug,
     teamMemberEmail,
+    useApiV2: useApiV2,
   });
 
   return {
@@ -122,5 +121,6 @@ export const useScheduleForEvent = ({
     isError: schedule?.isError,
     isSuccess: schedule?.isSuccess,
     isLoading: schedule?.isLoading,
+    invalidate: schedule?.invalidate,
   };
 };
